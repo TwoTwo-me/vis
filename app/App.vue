@@ -204,6 +204,7 @@ type FileReadEntry = {
   messageAgent?: string;
   messageModel?: string;
   messageVariant?: string;
+  messageTime?: number;
   callId?: string;
   permissionId?: string;
   follow?: boolean;
@@ -298,6 +299,7 @@ const messageIndexById = new Map<string, number>();
 const toolIndexByCallId = new Map<string, number>();
 const userMessageIds = new Set<string>();
 const userMessageMetaById = new Map<string, UserMessageMeta>();
+const userMessageTimeById = new Map<string, number>();
 const messageContentById = new Map<string, string>();
 const messagePartsById = new Map<string, Map<string, string>>();
 const messagePartOrderById = new Map<string, string[]>();
@@ -1639,6 +1641,14 @@ type UserMessageDisplay = {
   variant?: string;
 };
 
+function extractMessageTime(info?: Record<string, unknown>): number | undefined {
+  if (!info) return undefined;
+  const time = info.time as Record<string, unknown> | undefined;
+  if (!time || typeof time !== 'object') return undefined;
+  const created = time.created;
+  return typeof created === 'number' ? created : undefined;
+}
+
 function parseUserMessageMeta(info?: Record<string, unknown>): UserMessageMeta | null {
   if (!info) return null;
   const role = typeof info.role === 'string' ? info.role : '';
@@ -1683,6 +1693,11 @@ function storeUserMessageMeta(messageId: string | undefined, meta: UserMessageMe
   userMessageMetaById.set(messageId, meta);
 }
 
+function storeUserMessageTime(messageId: string | undefined, messageTime?: number) {
+  if (!messageId || typeof messageTime !== 'number') return;
+  userMessageTimeById.set(messageId, messageTime);
+}
+
 function resolveUserMessageMetaForMessage(
   messageId?: string,
   fallbackId?: string,
@@ -1698,6 +1713,21 @@ function resolveUserMessageMetaForMessage(
   return null;
 }
 
+function resolveUserMessageTimeForMessage(
+  messageId?: string,
+  fallbackId?: string,
+  messageTime?: number,
+): number | undefined {
+  if (typeof messageTime === 'number') return messageTime;
+  if (messageId && userMessageTimeById.has(messageId)) {
+    return userMessageTimeById.get(messageId);
+  }
+  if (fallbackId && userMessageTimeById.has(fallbackId)) {
+    return userMessageTimeById.get(fallbackId);
+  }
+  return undefined;
+}
+
 function applyUserMessageMetaToQueue(messageId: string, meta: UserMessageMeta) {
   const displayMeta = resolveUserMessageDisplay(meta);
   if (!displayMeta) return;
@@ -1709,6 +1739,17 @@ function applyUserMessageMetaToQueue(messageId: string, meta: UserMessageMeta) {
       messageAgent: displayMeta.agent ?? entry.messageAgent,
       messageModel: displayMeta.model ?? entry.messageModel,
       messageVariant: displayMeta.variant ?? entry.messageVariant,
+    });
+  });
+}
+
+function applyUserMessageTimeToQueue(messageId: string, messageTime: number) {
+  queue.value.forEach((entry, index) => {
+    if (!entry.isMessage || entry.messageId !== messageId) return;
+    if (entry.role !== 'user') return;
+    queue.value.splice(index, 1, {
+      ...entry,
+      messageTime,
     });
   });
 }
@@ -1762,12 +1803,20 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
         const id = typeof info?.id === 'string' ? info.id : undefined;
         const role = typeof info?.role === 'string' ? info.role : undefined;
         const meta = parseUserMessageMeta(info);
+        const messageTime = extractMessageTime(info);
         if (!id) return null;
-        return { id, role, text, meta };
+        return { id, role, text, meta, messageTime };
       })
       .filter(
-        (entry): entry is { id: string; role?: string; text: string; meta: UserMessageMeta | null } =>
-          Boolean(entry),
+        (
+          entry,
+        ): entry is {
+          id: string;
+          role?: string;
+          text: string;
+          meta: UserMessageMeta | null;
+          messageTime?: number;
+        } => Boolean(entry),
       );
 
     history.slice(-HISTORY_LIMIT).forEach((entry) => {
@@ -1776,6 +1825,8 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
       storeUserMessageMeta(entry.id, entry.meta);
       const resolvedMeta = resolveUserMessageMetaForMessage(entry.id, undefined, entry.meta);
       const displayMeta = resolveUserMessageDisplay(resolvedMeta);
+      storeUserMessageTime(entry.id, entry.messageTime);
+      const resolvedTime = resolveUserMessageTimeForMessage(entry.id, undefined, entry.messageTime);
       const header = '';
       const time = Date.now();
       const text = `${header}${entry.text}`;
@@ -1801,6 +1852,7 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
         messageAgent: displayMeta?.agent,
         messageModel: displayMeta?.model,
         messageVariant: displayMeta?.variant,
+        messageTime: resolvedTime,
         scroll: overflowLines > 0,
         scrollDistance,
         scrollDuration,
@@ -3259,6 +3311,9 @@ function extractMessage(payload: unknown, eventType: string) {
   const userMeta =
     parseUserMessageMeta(info) ??
     parseUserMessageMeta(messageObject as Record<string, unknown> | undefined);
+  const messageTime =
+    extractMessageTime(info) ??
+    extractMessageTime(messageObject as Record<string, unknown> | undefined);
 
   const messageId =
     (part?.messageID as string | undefined) ??
@@ -3277,8 +3332,20 @@ function extractMessage(payload: unknown, eventType: string) {
   if (userMeta) {
     storeUserMessageMeta(messageId ?? id, userMeta);
   }
+  if (resolvedRole === 'user' && typeof messageTime === 'number') {
+    storeUserMessageTime(messageId ?? id, messageTime);
+  }
 
-  return { id, messageId, content: message, role: resolvedRole, partId, partType, userMeta };
+  return {
+    id,
+    messageId,
+    content: message,
+    role: resolvedRole,
+    partId,
+    partType,
+    userMeta,
+    messageTime,
+  };
 }
 
 function extractStepFinish(payload: unknown, eventType: string) {
@@ -3646,6 +3713,7 @@ function registerMessageMeta(payload: unknown) {
     (properties?.role as string | undefined) ??
     (record.role as string | undefined);
   const meta = parseUserMessageMeta(info);
+  const messageTime = extractMessageTime(info);
 
   if (id && role === 'user') {
     userMessageIds.add(id);
@@ -3653,6 +3721,10 @@ function registerMessageMeta(payload: unknown) {
   if (id && meta) {
     storeUserMessageMeta(id, meta);
     applyUserMessageMetaToQueue(id, meta);
+  }
+  if (id && typeof messageTime === 'number') {
+    storeUserMessageTime(id, messageTime);
+    applyUserMessageTimeToQueue(id, messageTime);
   }
 }
 
@@ -4054,6 +4126,11 @@ function connect() {
         message.id,
         message.userMeta ?? null,
       );
+      const resolvedTime = resolveUserMessageTimeForMessage(
+        message.messageId,
+        message.id,
+        message.messageTime,
+      );
       const displayMeta = isUserMessage ? resolveUserMessageDisplay(resolvedMeta) : null;
 
       const header = '';
@@ -4112,6 +4189,7 @@ function connect() {
           const nextMessageAgent = displayMeta?.agent ?? existing.messageAgent;
           const nextMessageModel = displayMeta?.model ?? existing.messageModel;
           const nextMessageVariant = displayMeta?.variant ?? existing.messageVariant;
+          const nextMessageTime = resolvedTime ?? existing.messageTime;
           queue.value.splice(existingIndex, 1, {
             ...existing,
             time,
@@ -4122,6 +4200,7 @@ function connect() {
             messageAgent: nextMessageAgent,
             messageModel: nextMessageModel,
             messageVariant: nextMessageVariant,
+            messageTime: nextMessageTime,
             scroll: !isFloatingMessage && nextOverflowLines > 0,
             scrollDistance: isFloatingMessage ? 0 : nextScrollDistance,
             scrollDuration: isFloatingMessage ? 0 : nextScrollDuration,
@@ -4151,6 +4230,7 @@ function connect() {
         messageAgent: displayMeta?.agent,
         messageModel: displayMeta?.model,
         messageVariant: displayMeta?.variant,
+        messageTime: resolvedTime,
         scroll: !isFloatingMessage && overflowLines > 0,
         scrollDistance: isFloatingMessage ? 0 : scrollDistance,
         scrollDuration: isFloatingMessage ? 0 : scrollDuration,

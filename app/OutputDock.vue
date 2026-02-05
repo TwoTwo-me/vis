@@ -17,6 +17,12 @@
           :class="{ 'is-user': q.role === 'user' }"
         >
           <div
+            v-if="q.role === 'user' && formatMessageAgent(q)"
+            class="message-agent"
+          >
+            {{ formatMessageAgent(q) }}
+          </div>
+          <div
             class="message-inner"
             :class="{ 'is-scrolling': q.scroll }"
             :style="{
@@ -76,6 +82,7 @@ type FileReadEntry = {
   messageAgent?: string;
   messageModel?: string;
   messageVariant?: string;
+  messageTime?: number;
   toolStatus?: string;
   toolName?: string;
   messageId?: string;
@@ -104,15 +111,32 @@ const thinkingSuffix = ref('');
 let thinkingTimer: number | undefined;
 
 function formatMessageMeta(entry: FileReadEntry) {
-  const agent = entry.messageAgent?.trim();
   const model = entry.messageModel?.trim();
   const variant = entry.messageVariant?.trim();
-  const parts: string[] = [];
-  if (agent) parts.push(`[${agent}]`);
-  if (model) parts.push(model);
-  const suffix = variant ? `(${variant})` : '';
-  if (suffix) parts.push(suffix);
-  return parts.join(' ');
+  const baseParts: string[] = [];
+  if (model) baseParts.push(model);
+  if (variant) baseParts.push(`(${variant})`);
+  const base = baseParts.join(' ');
+  const timestamp = formatMessageTime(entry.messageTime);
+  return [base, timestamp].filter((part) => part).join(' • ');
+}
+
+function formatMessageAgent(entry: FileReadEntry) {
+  const agent = entry.messageAgent?.trim();
+  if (!agent) return '';
+  return `[${agent.toUpperCase()}]`;
+}
+
+function formatMessageTime(value?: number) {
+  if (typeof value !== 'number') return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
 }
 
 watch(
@@ -184,10 +208,11 @@ defineExpose({ dockEl });
 }
 
 .message-entry {
+  position: relative;
   background: rgba(2, 6, 23, 0.6);
   border: 1px solid #1e293b;
   border-radius: 10px;
-  padding: 8px 10px;
+  padding: 10px 10px;
   max-width: 100%;
   width: 100%;
   box-sizing: border-box;
@@ -196,6 +221,8 @@ defineExpose({ dockEl });
 .message-entry.is-user {
   background: rgba(37, 99, 235, 0.18);
   border-color: rgba(59, 130, 246, 0.6);
+  padding-top: 18px;
+  padding-bottom: 18px;
 }
 
 .message-inner {
@@ -206,9 +233,18 @@ defineExpose({ dockEl });
   line-height: var(--message-line-height);
 }
 
+.message-agent {
+  position: absolute;
+  top: 6px;
+  left: 6px;
+  font-size: 10px;
+  color: rgba(191, 219, 254, 0.9);
+}
+
 .message-meta {
-  margin-top: 6px;
-  text-align: right;
+  position: absolute;
+  bottom: 6px;
+  right: 10px;
   font-size: 10px;
   color: rgba(191, 219, 254, 0.9);
 }
