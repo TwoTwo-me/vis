@@ -141,6 +141,7 @@ const slashQuery = computed(() => {
 
 const commandMatches = computed(() => {
   if (!messageValue.value.startsWith('/')) return [];
+  if (/\s/.test(messageValue.value.slice(1))) return [];
   const query = slashQuery.value.trim().toLowerCase();
   const list = props.commands ?? [];
   const matches = list.filter((command) =>
@@ -169,7 +170,8 @@ watch(commandMatches, (matches) => {
 function applyCommandSelection(name: string) {
   const current = messageValue.value;
   const rest = current.replace(/^\/\S*/, '');
-  messageValue.value = `/${name}${rest}`;
+  const nextRest = rest.length > 0 ? rest : ' ';
+  messageValue.value = `/${name}${nextRest}`;
   nextTick(() => {
     textareaRef.value?.focus();
   });
@@ -186,22 +188,34 @@ function selectActiveCommand() {
 }
 
 function handleKeydown(event: KeyboardEvent) {
-  if (!commandPopupOpen.value) return;
-  const total = commandMatches.value.length;
-  if (total === 0) return;
-  if (event.key === 'ArrowDown') {
-    event.preventDefault();
-    activeCommandIndex.value = (activeCommandIndex.value + 1) % total;
-    return;
-  }
-  if (event.key === 'ArrowUp') {
-    event.preventDefault();
-    activeCommandIndex.value = (activeCommandIndex.value - 1 + total) % total;
-    return;
-  }
-  if (event.key === 'Tab') {
-    event.preventDefault();
-    selectActiveCommand();
+  if (commandPopupOpen.value) {
+    const total = commandMatches.value.length;
+    if (total === 0) return;
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      activeCommandIndex.value = (activeCommandIndex.value + 1) % total;
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      activeCommandIndex.value = (activeCommandIndex.value - 1 + total) % total;
+      return;
+    }
+    if (event.key === 'Tab') {
+      event.preventDefault();
+      selectActiveCommand();
+      return;
+    }
+    if (
+      event.key === 'Enter' &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+      selectActiveCommand();
+    }
     return;
   }
   if (
@@ -209,10 +223,11 @@ function handleKeydown(event: KeyboardEvent) {
     !event.ctrlKey &&
     !event.metaKey &&
     !event.shiftKey &&
-    !event.altKey
+    !event.altKey &&
+    messageValue.value.startsWith('/')
   ) {
     event.preventDefault();
-    selectActiveCommand();
+    emit('send');
   }
 }
 

@@ -91,7 +91,7 @@
         :has-thinking-options="hasThinkingOptions"
         :is-thinking="isThinking"
         :can-abort="canAbort"
-        :commands="commands"
+        :commands="commandOptions"
         v-model:message-input="messageInput"
         v-model:selected-mode="selectedMode"
         v-model:selected-model="selectedModel"
@@ -385,6 +385,19 @@ const canAbort = computed(() =>
 const hasAgentOptions = computed(() => agentOptions.value.length > 0);
 const hasModelOptions = computed(() => modelOptions.value.length > 0);
 const hasThinkingOptions = computed(() => thinkingOptions.value.length > 0);
+const commandOptions = computed(() => {
+  const list = commands.value.slice();
+  const hasShell = list.some((command) => command.name.toLowerCase() === 'shell');
+  if (!hasShell) {
+    list.push({
+      name: 'shell',
+      description: 'Open a local shell session.',
+      source: 'local',
+    });
+  }
+  list.sort((a, b) => a.name.localeCompare(b.name));
+  return list;
+});
 
 function projectLabel(project: ProjectInfo) {
   if (project.id === 'global') return 'global /';
