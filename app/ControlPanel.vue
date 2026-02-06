@@ -74,6 +74,7 @@
         </div>
         <div class="control-field compact">
           <select
+            ref="modelSelectRef"
             id="model-select"
             v-model="modelValue"
             class="control-input"
@@ -97,8 +98,8 @@
             title="Variant"
           >
             <option v-if="!hasThinkingOptions" value="">Loading...</option>
-            <option v-for="option in thinkingOptions" :key="option" :value="option">
-              {{ option }}
+            <option v-for="option in thinkingOptions" :key="option ?? '__default'" :value="option">
+              {{ option === undefined ? '<default>' : option }}
             </option>
           </select>
         </div>
@@ -144,9 +145,9 @@ const props = defineProps<{
   agentOptions: Array<{ id: string; label: string }>;
   hasAgentOptions: boolean;
   selectedModel: string;
-  selectedThinking: string;
+  selectedThinking: string | undefined;
   modelOptions: ModelOption[];
-  thinkingOptions: string[];
+  thinkingOptions: Array<string | undefined>;
   hasModelOptions: boolean;
   hasThinkingOptions: boolean;
   isThinking: boolean;
@@ -159,7 +160,7 @@ const emit = defineEmits<{
   (event: 'update:message-input', value: string): void;
   (event: 'update:selected-mode', value: string): void;
   (event: 'update:selected-model', value: string): void;
-  (event: 'update:selected-thinking', value: string): void;
+  (event: 'update:selected-thinking', value: string | undefined): void;
   (event: 'send'): void;
   (event: 'abort'): void;
   (event: 'add-attachments', files: File[]): void;
@@ -173,6 +174,7 @@ const messageValue = computed({
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
+const modelSelectRef = ref<HTMLSelectElement | null>(null);
 const activeCommandIndex = ref(0);
 const acceptMime = 'image/png,image/jpeg,image/gif,image/webp';
 
@@ -246,6 +248,55 @@ function hasMatchingCommand(name: string) {
   );
 }
 
+function nextCyclicIndex(current: string | undefined, options: Array<string | undefined>) {
+  if (options.length === 0) return -1;
+  const index = options.indexOf(current);
+  if (index < 0) return 0;
+  return (index + 1) % options.length;
+}
+
+function prevCyclicIndex(current: string | undefined, options: Array<string | undefined>) {
+  if (options.length === 0) return -1;
+  const index = options.indexOf(current);
+  if (index < 0) return options.length - 1;
+  return (index - 1 + options.length) % options.length;
+}
+
+function cycleAgent() {
+  if (!props.hasAgentOptions) return false;
+  const options = (props.agentOptions ?? []).map((option) => option.id);
+  const nextIndex = nextCyclicIndex(props.selectedMode, options);
+  if (nextIndex < 0) return false;
+  emit('update:selected-mode', options[nextIndex]!);
+  return true;
+}
+
+function cycleVariant(direction: 'next' | 'prev') {
+  if (!props.hasThinkingOptions) return false;
+  const options = props.thinkingOptions ?? [];
+  const nextIndex =
+    direction === 'next'
+      ? nextCyclicIndex(props.selectedThinking, options)
+      : prevCyclicIndex(props.selectedThinking, options);
+  if (nextIndex < 0) return false;
+  emit('update:selected-thinking', options[nextIndex]!);
+  return true;
+}
+
+function openModelPicker() {
+  if (!props.hasModelOptions) return false;
+  const modelSelect = modelSelectRef.value;
+  if (!modelSelect) return false;
+  modelSelect.focus();
+  const picker = modelSelect as HTMLSelectElement & { showPicker?: () => void };
+  if (typeof picker.showPicker === 'function') {
+    picker.showPicker();
+    return true;
+  }
+  modelSelect.click();
+  return true;
+}
+
 function handleKeydown(event: KeyboardEvent) {
   if (commandPopupOpen.value) {
     const total = commandMatches.value.length;
@@ -260,7 +311,7 @@ function handleKeydown(event: KeyboardEvent) {
       activeCommandIndex.value = (activeCommandIndex.value - 1 + total) % total;
       return;
     }
-    if (event.key === 'Tab') {
+    if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
       event.preventDefault();
       selectActiveCommand();
       return;
@@ -275,6 +326,26 @@ function handleKeydown(event: KeyboardEvent) {
       event.preventDefault();
       selectActiveCommand();
     }
+    return;
+  }
+  if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
+    if (!cycleAgent()) return;
+    event.preventDefault();
+    return;
+  }
+  if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === '.') {
+    if (!cycleVariant('next')) return;
+    event.preventDefault();
+    return;
+  }
+  if (event.ctrlKey && !event.metaKey && !event.altKey && event.key === ',') {
+    if (!cycleVariant('prev')) return;
+    event.preventDefault();
+    return;
+  }
+  if (event.ctrlKey && !event.metaKey && !event.altKey && event.key.toLowerCase() === 'm') {
+    if (!openModelPicker()) return;
+    event.preventDefault();
     return;
   }
   if (

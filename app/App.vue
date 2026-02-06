@@ -455,7 +455,7 @@ const modelOptions = ref<
   Array<{ id: string; label: string; providerID?: string; variants?: Record<string, unknown> }>
 >([]);
 const agentOptions = ref<Array<{ id: string; label: string }>>([]);
-const thinkingOptions = ref<string[]>([]);
+const thinkingOptions = ref<Array<string | undefined>>([]);
 const providersLoaded = ref(false);
 const providersLoading = ref(false);
 const providersFetchCount = ref(0);
@@ -471,7 +471,7 @@ if (initialQuery.sessionId) selectedSessionId.value = initialQuery.sessionId;
 const isProjectPickerOpen = ref(false);
 const selectedMode = ref('build');
 const selectedModel = ref('');
-const selectedThinking = ref('');
+const selectedThinking = ref<string | undefined>(undefined);
 const projectError = ref('');
 const worktreeError = ref('');
 const sessionError = ref('');
@@ -630,6 +630,11 @@ function pickPreferredSessionId(list: SessionInfo[]) {
 function toErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function buildThinkingOptions(variants?: Record<string, unknown>) {
+  const keys = Object.keys(variants ?? {}).sort();
+  return [undefined, ...keys] as Array<string | undefined>;
 }
 
 type QuerySelection = {
@@ -1763,7 +1768,9 @@ async function fetchProviders() {
     }> = [];
     providers.value.forEach((provider) => {
       Object.values(provider.models ?? {}).forEach((model) => {
-        const label = model.name ? `${model.name} (${model.id})` : model.id;
+        const providerLabel = provider.id || model.providerID || 'unknown';
+        const modelLabel = model.name ? `${model.name} (${model.id})` : model.id;
+        const label = `${providerLabel} / ${modelLabel}`;
         models.push({
           id: model.id,
           label,
@@ -1788,15 +1795,13 @@ async function fetchProviders() {
       selectedModel.value = preferredModelId || firstModel || '';
     }
     const selectedInfo = modelOptions.value.find((model) => model.id === selectedModel.value);
-    const variants = selectedInfo?.variants ?? {};
-    const keys = Object.keys(variants).sort();
-    const nextThinkingOptions = keys.length > 0 ? keys : ['default'];
+    const nextThinkingOptions = buildThinkingOptions(selectedInfo?.variants);
     const sameThinking =
       nextThinkingOptions.length === thinkingOptions.value.length &&
       nextThinkingOptions.every((value, index) => value === thinkingOptions.value[index]);
     if (!sameThinking) thinkingOptions.value = nextThinkingOptions;
-    if (!selectedThinking.value || !nextThinkingOptions.includes(selectedThinking.value)) {
-      selectedThinking.value = thinkingOptions.value[0] ?? '';
+    if (selectedThinking.value === undefined || !nextThinkingOptions.includes(selectedThinking.value)) {
+      selectedThinking.value = thinkingOptions.value[0];
       log('providers thinking set', selectedThinking.value);
     }
     providersLoaded.value = true;
@@ -1958,11 +1963,10 @@ function resolveUserMessageDisplay(meta: UserMessageMeta | null): UserMessageDis
   const model = formatUserMessageModel(meta);
   const hasAny = Boolean(meta.agent || model || meta.variant);
   if (!hasAny) return null;
-  const variant = meta.variant ?? (meta.agent || model ? 'default' : undefined);
   return {
     agent: meta.agent,
     model,
-    variant,
+    variant: meta.variant,
   };
 }
 
@@ -2068,7 +2072,7 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
         if (selection.variant) {
           selectedThinking.value = selection.variant;
         } else if (selection.agent || selection.modelId) {
-          selectedThinking.value = 'default';
+          selectedThinking.value = undefined;
         }
       }
     }
@@ -2410,7 +2414,7 @@ async function sendCommand(sessionId: string, command: CommandInfo, commandArgs:
       arguments: commandArgs,
       agent: command.agent || selectedMode.value,
       model: command.model || selectedModel.value,
-      variant: selectedThinking.value !== 'default' ? selectedThinking.value : undefined,
+      variant: selectedThinking.value,
     }),
   });
   if (!response.ok) throw new Error(`Command failed (${response.status})`);
@@ -2486,7 +2490,7 @@ async function sendMessage() {
           providerID: selectedInfo?.providerID,
           modelID: selectedModel.value,
         },
-        variant: selectedThinking.value !== 'default' ? selectedThinking.value : undefined,
+        variant: selectedThinking.value,
         parts,
       }),
       },
@@ -2687,15 +2691,13 @@ watch(
 
 watch(selectedModel, () => {
   const selectedInfo = modelOptions.value.find((model) => model.id === selectedModel.value);
-  const variants = selectedInfo?.variants ?? {};
-  const keys = Object.keys(variants).sort();
-  const nextThinkingOptions = keys.length > 0 ? keys : ['default'];
+  const nextThinkingOptions = buildThinkingOptions(selectedInfo?.variants);
   const sameThinking =
     nextThinkingOptions.length === thinkingOptions.value.length &&
     nextThinkingOptions.every((value, index) => value === thinkingOptions.value[index]);
   if (!sameThinking) thinkingOptions.value = nextThinkingOptions;
-  if (!selectedThinking.value || !nextThinkingOptions.includes(selectedThinking.value)) {
-    selectedThinking.value = nextThinkingOptions[0] ?? '';
+  if (selectedThinking.value === undefined || !nextThinkingOptions.includes(selectedThinking.value)) {
+    selectedThinking.value = nextThinkingOptions[0];
   }
 });
 
