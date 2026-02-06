@@ -79,7 +79,6 @@ type ToolWindowEntry = {
   isShell?: boolean;
   isPermission?: boolean;
   isQuestion?: boolean;
-  isTaskList?: boolean;
   role?: 'user' | 'assistant';
   toolName?: string;
   toolKey?: string;
@@ -124,8 +123,7 @@ const showResizer = computed(
     entry.value.isSubagentMessage ||
     entry.value.isShell ||
     entry.value.isPermission ||
-    entry.value.isQuestion ||
-    entry.value.isTaskList,
+    entry.value.isQuestion,
 );
 
 const termClass = computed(() => ({
@@ -140,7 +138,6 @@ const termClass = computed(() => ({
   'is-shell': entry.value.isShell,
   'is-permission': entry.value.isPermission,
   'is-question': entry.value.isQuestion,
-  'is-tasklist': entry.value.isTaskList,
 }));
 
 const termStyle = computed(() => ({
@@ -195,7 +192,6 @@ function onFloatingWheel(event: WheelEvent) {
 
 .term.is-message,
 .term.is-shell,
-.term.is-tasklist,
 .term.is-message.agent-tone-build,
 .term.is-message.agent-tone-plan {
   background: #050505;
@@ -279,7 +275,7 @@ function onFloatingWheel(event: WheelEvent) {
 }
 
 .term.is-reasoning .term-inner,
-.term.is-tasklist .term-inner {
+.term.is-reasoning .term-inner {
   overflow: auto;
 }
 
@@ -288,74 +284,6 @@ function onFloatingWheel(event: WheelEvent) {
 .term.is-question .term-inner {
   padding: 0;
   overflow: hidden;
-}
-
-.term.is-tasklist .term-inner {
-  padding: 8px;
-}
-
-.tasklist {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tasklist-header {
-  font-size: 12px;
-  font-weight: 600;
-  color: #e2e8f0;
-}
-
-.tasklist-items {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tasklist-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
-  color: #e2e8f0;
-}
-
-.tasklist-status {
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(148, 163, 184, 0.18);
-  color: #e2e8f0;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  white-space: nowrap;
-}
-
-.tasklist-item.is-running .tasklist-status {
-  background: rgba(16, 185, 129, 0.2);
-  color: #6ee7b7;
-  border-color: rgba(16, 185, 129, 0.5);
-}
-
-.tasklist-item.is-pending .tasklist-status {
-  background: rgba(245, 158, 11, 0.2);
-  color: #fcd34d;
-  border-color: rgba(245, 158, 11, 0.5);
-}
-
-.tasklist-text {
-  flex: 1;
-}
-
-.tasklist-session {
-  font-size: 11px;
-  color: #94a3b8;
-  margin-left: 4px;
-  white-space: nowrap;
 }
 
 .xterm-host {

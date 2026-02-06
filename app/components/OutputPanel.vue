@@ -239,6 +239,7 @@ defineExpose({ panelEl });
   color: #e2e8f0;
   border: 1px solid #334155;
   border-radius: 12px;
+  background-clip: padding-box;
   box-shadow: 0 12px 32px rgba(2, 6, 23, 0.45);
   display: flex;
   flex-direction: column;

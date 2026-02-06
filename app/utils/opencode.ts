@@ -160,6 +160,10 @@ export function listSessionMessages(baseUrl: string, sessionId: string, director
   return getJson(baseUrl, `/session/${sessionId}/message`, { directory }) as Promise<unknown>;
 }
 
+export function getSessionTodos(baseUrl: string, sessionId: string, directory?: string) {
+  return getJson(baseUrl, `/session/${sessionId}/todo`, { directory }) as Promise<unknown>;
+}
+
 export function listPtys(baseUrl: string, directory?: string) {
   return getJson(baseUrl, '/pty', { directory }) as Promise<unknown>;
 }

@@ -21,23 +21,32 @@
     </header>
     <main ref="outputEl" class="app-output">
       <div class="output-workspace">
-        <div class="tool-window-layer">
-          <OutputPanel
-            ref="outputPanelRef"
-            class="output-panel"
-            :queue="queue"
-            :is-following="isFollowing"
-            :status-text="statusText"
-            :is-status-error="isStatusError"
-            :is-thinking="isThinking"
-            :is-retry-status="!!retryStatus"
-            @scroll="handleOutputPanelScroll"
-            @wheel="handleOutputPanelWheel"
-            @touchmove="handleOutputPanelScroll"
-            @resume-follow="resumeFollow"
-            @fork-message="handleForkMessage"
-            @revert-message="handleRevertMessage"
-          />
+        <div class="tool-window-layer" :class="{ 'todo-collapsed': todoPanelCollapsed }">
+          <div class="output-split" :class="{ 'todo-collapsed': todoPanelCollapsed }">
+            <OutputPanel
+              ref="outputPanelRef"
+              class="output-panel"
+              :queue="queue"
+              :is-following="isFollowing"
+              :status-text="statusText"
+              :is-status-error="isStatusError"
+              :is-thinking="isThinking"
+              :is-retry-status="!!retryStatus"
+              @scroll="handleOutputPanelScroll"
+              @wheel="handleOutputPanelWheel"
+              @touchmove="handleOutputPanelScroll"
+              @resume-follow="resumeFollow"
+              @fork-message="handleForkMessage"
+              @revert-message="handleRevertMessage"
+            />
+            <TodoPanel
+              class="todo-panel"
+              :collapsed="todoPanelCollapsed"
+              :sessions="todoPanelSessions"
+              :total-count="todoPanelCount"
+              @toggle-collapse="toggleTodoPanelCollapsed"
+            />
+          </div>
           <div ref="toolWindowCanvasEl" class="tool-window-canvas">
             <TransitionGroup appear name="fade">
               <ToolWindow
@@ -111,6 +120,7 @@ import { Terminal } from '@xterm/xterm';
 import InputPanel from './components/InputPanel.vue';
 import OutputPanel from './components/OutputPanel.vue';
 import ProjectPicker from './components/ProjectPicker.vue';
+import TodoPanel from './components/TodoPanel.vue';
 import ToolWindow from './components/ToolWindow.vue';
 import TopPanel from './components/TopPanel.vue';
 import { useOutputPanelFollow } from './composables/useOutputPanelFollow';
@@ -125,8 +135,8 @@ const TOOL_COMPLETE_TTL_MS = 2_000;
 const TOOL_SCROLL_SPEED_PX_S = 2000;
 const TOOL_SCROLL_HOLD_MS = 250;
 const SUBAGENT_ACTIVE_TTL_MS = 60 * 60 * 1000;
-const TASK_WINDOW_WIDTH = 360;
-const TASK_WINDOW_HEIGHT = 240;
+const TODO_PANEL_COLLAPSED_STORAGE_KEY = 'opencode.todoPanelCollapsed.v1';
+const SHELL_WINDOW_Z_BASE = 1_000_000;
 const PERMISSION_WINDOW_WIDTH = 760;
 const PERMISSION_WINDOW_HEIGHT = 340;
 const PERMISSION_WINDOW_MIN_WIDTH = 560;
@@ -146,7 +156,6 @@ const TERM_INNER_PADDING_Y_PX = 4;
 const TERM_GUTTER_WIDTH_EM = 3.2;
 const TERM_FONT_FAMILY =
   "'Iosevka Term', 'Iosevka Fixed', 'JetBrains Mono', 'Cascadia Mono', 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace";
-const TASK_LIST_TOOL_KEY = 'task:list';
 const MAIN_REASONING_TITLE = 'Reasoning';
 const REASONING_CLOSE_DELAY_MS = 3000;
 const SHELL_PTY_STORAGE_KEY = 'opencode.shellPtys';
@@ -199,7 +208,6 @@ type FileReadEntry = {
   isShell?: boolean;
   isPermission?: boolean;
   isQuestion?: boolean;
-  isTaskList?: boolean;
   sessionId?: string;
   toolKey?: string;
   role?: 'user' | 'assistant';
@@ -229,20 +237,20 @@ type FileReadEntry = {
   questionRequest?: QuestionRequest;
 };
 
-type TaskStatus = 'pending' | 'in_progress' | 'completed' | 'cancelled';
-
-type TaskSource = 'subtask' | 'tool';
-
-type TaskItem = {
+type TodoItem = {
   id: string;
-  sessionId: string;
-  messageId?: string;
-  callId?: string;
   content: string;
-  status: TaskStatus;
-  source: TaskSource;
-  updatedAt: number;
-  subSessionId?: string;
+  status: string;
+  priority: string;
+};
+
+type TodoPanelSession = {
+  sessionId: string;
+  title: string;
+  isSubagent: boolean;
+  todos: TodoItem[];
+  loading: boolean;
+  error?: string;
 };
 
 type PermissionRequest = {
@@ -417,9 +425,11 @@ const permissionErrorById = ref<Record<string, string>>({});
 const questionSendingById = ref<Record<string, boolean>>({});
 const questionErrorById = ref<Record<string, string>>({});
 const pendingWorktreeMetaByDir = new Map<string, VcsInfo>();
-const tasksById = new Map<string, TaskItem>();
-const taskIdByMessageKey = new Map<string, string>();
-const taskIdByCallId = new Map<string, string>();
+const todoPanelCollapsed = ref(readTodoPanelCollapsed());
+const todosBySessionId = ref<Record<string, TodoItem[]>>({});
+const todoLoadingBySessionId = ref<Record<string, boolean>>({});
+const todoErrorBySessionId = ref<Record<string, string>>({});
+let todoReloadRequestId = 0;
 
 type ProjectInfo = {
   id: string;
@@ -591,6 +601,37 @@ const allowedSessionIds = computed(() => {
     if (children) stack.push(...children);
   }
   return allowed;
+});
+
+const todoPanelCount = computed(() =>
+  Object.values(todosBySessionId.value).reduce((sum, todos) => sum + todos.length, 0),
+);
+
+const todoPanelSessions = computed(() => {
+  const allowed = allowedSessionIds.value;
+  if (allowed.size === 0) return [] as TodoPanelSession[];
+  const list = Array.from(allowed).map((sessionId) => {
+    const session = sessions.value.find((item) => item.id === sessionId);
+    const title = sessionLabel(session ?? { id: sessionId });
+    const isSubagent = Boolean(sessionParentById.value.get(sessionId));
+    return {
+      sessionId,
+      title,
+      isSubagent,
+      todos: todosBySessionId.value[sessionId] ?? [],
+      loading: Boolean(todoLoadingBySessionId.value[sessionId]),
+      error: todoErrorBySessionId.value[sessionId],
+    };
+  });
+  const visible = list.filter((entry) => entry.todos.length > 0 || entry.loading || Boolean(entry.error));
+  if (visible.length === 0) return [] as TodoPanelSession[];
+  visible.sort((a, b) => {
+    if (a.sessionId === selectedSessionId.value) return -1;
+    if (b.sessionId === selectedSessionId.value) return 1;
+    if (a.isSubagent !== b.isSubagent) return a.isSubagent ? 1 : -1;
+    return a.title.localeCompare(b.title);
+  });
+  return visible;
 });
 
 const canSend = computed(() =>
@@ -847,6 +888,29 @@ function removeComposerDraft(contextKey: string) {
   writeComposerDraftStore(store);
 }
 
+function readTodoPanelCollapsed() {
+  if (typeof window === 'undefined') return false;
+  const raw = window.localStorage.getItem(TODO_PANEL_COLLAPSED_STORAGE_KEY);
+  return raw === '1';
+}
+
+function persistTodoPanelCollapsed(value: boolean) {
+  if (typeof window === 'undefined') return;
+  try {
+    window.localStorage.setItem(TODO_PANEL_COLLAPSED_STORAGE_KEY, value ? '1' : '0');
+  } catch {
+    return;
+  }
+}
+
+function toggleTodoPanelCollapsed() {
+  todoPanelCollapsed.value = !todoPanelCollapsed.value;
+  persistTodoPanelCollapsed(todoPanelCollapsed.value);
+  nextTick(() => {
+    scheduleShellFitAll();
+  });
+}
+
 function resolveProjectIdForSession(sessionId: string) {
   const matched = sessions.value.find((session) => session.id === sessionId);
   if (matched?.projectID) return matched.projectID;
@@ -1049,8 +1113,14 @@ function syncCanvasTermMetrics() {
   canvas.style.setProperty('--term-height', `${height}px`);
 }
 
+function handleWindowResize() {
+  syncCanvasTermMetrics();
+  scheduleShellFitAll();
+}
+
 function bringToFront(entry: FileReadEntry) {
-  entry.zIndex = nextWindowZ();
+  const z = nextWindowZ();
+  entry.zIndex = entry.isShell ? SHELL_WINDOW_Z_BASE + z : z;
 }
 
 function getCanvasMetrics() {
@@ -1365,7 +1435,6 @@ function getEntryPrefix(entry: FileReadEntry) {
   if (entry.isPermission) return 'PERMISSION';
   if (entry.isQuestion) return 'QUESTION';
   if (entry.isShell) return 'SHELL';
-  if (entry.isTaskList) return 'TASK';
   if (entry.isReasoning) return 'MESSAGE';
   if (entry.isSubagentMessage || entry.isMessage) return 'MESSAGE';
   if (entry.toolName === 'apply_patch') return 'PATCH';
@@ -1529,6 +1598,7 @@ function handlePointerMove(event: PointerEvent) {
     const { startY, startHeight, minHeight, maxHeight } = inputResizeState.value;
     const dy = event.clientY - startY;
     inputHeight.value = clamp(startHeight - dy, minHeight, maxHeight);
+    scheduleShellFitAll();
     return;
   }
   if (resizeState.value) {
@@ -1554,6 +1624,7 @@ function handlePointerMove(event: PointerEvent) {
 function handlePointerUp() {
   dragState.value = null;
   resizeState.value = null;
+  if (inputResizeState.value) scheduleShellFitAll();
   inputResizeState.value = null;
 }
 
@@ -2703,7 +2774,7 @@ function ensureShellWindow(pty: PtyInfo, sessionId: string, options: { preserve?
     shellId: pty.id,
     shellTitle: pty.title || 'Shell',
     sessionId,
-    zIndex: nextWindowZ(),
+    zIndex: SHELL_WINDOW_Z_BASE + nextWindowZ(),
   };
   queue.value.push(entry);
   if (!options.preserve) addShellPtyId(sessionId, pty.id);
@@ -2739,6 +2810,12 @@ function ensureShellWindow(pty: PtyInfo, sessionId: string, options: { preserve?
   });
 }
 
+function scheduleShellFitAll() {
+  shellSessionsByPtyId.forEach((_, ptyId) => {
+    scheduleShellFit(ptyId);
+  });
+}
+
 function scheduleShellFit(ptyId: string) {
   const existing = pendingShellFits.get(ptyId);
   if (existing) cancelAnimationFrame(existing);
@@ -2746,7 +2823,14 @@ function scheduleShellFit(ptyId: string) {
     pendingShellFits.delete(ptyId);
     const session = shellSessionsByPtyId.get(ptyId);
     if (!session) return;
-    session.fitAddon.fit();
+    const terminalElement = session.terminal.element;
+    if (!terminalElement || !terminalElement.isConnected) return;
+    try {
+      session.fitAddon.fit();
+    } catch (error) {
+      log('PTY fit failed', error);
+      return;
+    }
     const rows = session.terminal.rows;
     const cols = session.terminal.cols;
     if (rows > 0 && cols > 0) {
@@ -3359,9 +3443,13 @@ function reloadSelectedSessionState() {
   subagentSessionExpiry.clear();
   selectedSessionStatus.value = '';
   retryStatus.value = null;
+  todosBySessionId.value = {};
+  todoLoadingBySessionId.value = {};
+  todoErrorBySessionId.value = {};
   if (selectedSessionId.value) {
     void fetchHistory(selectedSessionId.value);
     void restoreShellSessions(selectedSessionId.value);
+    void reloadTodosForAllowedSessions();
     const directory = activeDirectory.value || undefined;
     void fetchPendingPermissions(directory);
     void fetchPendingQuestions(directory);
@@ -3451,12 +3539,17 @@ watch(activeDirectory, (directory) => {
   if (!activePath) return;
   if (selectedWorktreeDir.value && activePath !== selectedWorktreeDir.value) return;
   void fetchCommands(activePath);
+  void reloadTodosForAllowedSessions();
+});
+
+watch(todoPanelCollapsed, () => {
+  persistTodoPanelCollapsed(todoPanelCollapsed.value);
 });
 
 watch(
   allowedSessionIds,
   () => {
-    pruneTasksForAllowedSessions();
+    void reloadTodosForAllowedSessions();
   },
   { immediate: true },
 );
@@ -4013,231 +4106,64 @@ function escapeHtml(value: string) {
     .replace(/'/g, '&#39;');
 }
 
-const TASK_STATUS_LABELS: Record<TaskStatus, string> = {
-  pending: 'Pending',
-  in_progress: 'Running',
-  completed: 'Done',
-  cancelled: 'Failed',
-};
-
-const TASK_STATUS_ORDER: Record<TaskStatus, number> = {
-  in_progress: 0,
-  pending: 1,
-  completed: 2,
-  cancelled: 3,
-};
-
-type TaskUpdate =
-  | {
-      kind: 'subtask';
-      sessionId: string;
-      messageId?: string;
-      taskId?: string;
-      content: string;
-    }
-  | {
-      kind: 'tool';
-      sessionId: string;
-      messageId?: string;
-      callId?: string;
-      content: string;
-      status: TaskStatus;
-      subSessionId?: string;
-    };
-
-function normalizeTaskStatus(status?: string): TaskStatus {
-  switch (status) {
-    case 'running':
-      return 'in_progress';
-    case 'completed':
-      return 'completed';
-    case 'error':
-      return 'cancelled';
-    case 'pending':
-    default:
-      return 'pending';
-  }
-}
-
-function buildTaskListHtml(tasks: TaskItem[]) {
-  const header = tasks.length === 1 ? '1 task' : `${tasks.length} tasks`;
-  const items = tasks
-    .map((task) => {
-      const displayContent = (task.content || '').trim() || 'Task';
-      const statusLabel = TASK_STATUS_LABELS[task.status] ?? task.status;
-      const statusClass = task.status === 'in_progress' ? 'is-running' : 'is-pending';
-      const subSessionLabel =
-        task.subSessionId && task.subSessionId !== task.sessionId
-          ? getSessionTitle(task.subSessionId) ?? task.subSessionId
-          : undefined;
-      const sessionLabel =
-        subSessionLabel ??
-        (task.sessionId !== selectedSessionId.value
-          ? getSessionTitle(task.sessionId) ?? task.sessionId
-          : undefined);
-      const sessionHtml = sessionLabel
-        ? `<span class="tasklist-session">${escapeHtml(sessionLabel)}</span>`
-        : '';
-      return `<li class="tasklist-item ${statusClass}"><span class="tasklist-status">${escapeHtml(
-        statusLabel,
-      )}</span><span class="tasklist-text">${escapeHtml(displayContent)}</span>${sessionHtml}</li>`;
-    })
-    .join('');
-  return `<div class="tasklist"><div class="tasklist-header">${escapeHtml(
-    header,
-  )}</div><ul class="tasklist-items">${items}</ul></div>`;
-}
-
-function updateTaskListWindow() {
-  if (!selectedSessionId.value) {
-    const existingIndex = queue.value.findIndex((entry) => entry.isTaskList);
-    if (existingIndex >= 0) queue.value.splice(existingIndex, 1);
-    return;
-  }
-  const allowed = allowedSessionIds.value;
-  const tasks = Array.from(tasksById.values()).filter((task) => allowed.has(task.sessionId));
-  if (tasks.length === 0) {
-    const existingIndex = queue.value.findIndex((entry) => entry.isTaskList);
-    if (existingIndex >= 0) queue.value.splice(existingIndex, 1);
-    return;
-  }
-  tasks.sort((a, b) => {
-    const orderDiff = TASK_STATUS_ORDER[a.status] - TASK_STATUS_ORDER[b.status];
-    if (orderDiff !== 0) return orderDiff;
-    return b.updatedAt - a.updatedAt;
-  });
-  const html = buildTaskListHtml(tasks);
-  const content = tasks
-    .map((task) => {
-      const displayContent = (task.content || '').trim() || 'Task';
-      return `${task.status}: ${displayContent}`;
-    })
-    .join('\n');
-  const time = Date.now();
-  const existingIndex = queue.value.findIndex((entry) => entry.isTaskList);
-  if (existingIndex >= 0) {
-    const existing = queue.value[existingIndex];
-    if (!existing) return;
-    queue.value.splice(existingIndex, 1, {
-      ...existing,
-      time,
-      expiresAt: Number.MAX_SAFE_INTEGER,
-      content,
-      html,
-      toolTitle: existing.toolTitle ?? 'Tasks',
-    });
-    return;
-  }
-  const randomPosition = getRandomWindowPosition({
-    width: TASK_WINDOW_WIDTH,
-    height: TASK_WINDOW_HEIGHT,
-  });
-  queue.value.push({
-    time,
-    expiresAt: Number.MAX_SAFE_INTEGER,
-    x: randomPosition.x,
-    y: randomPosition.y,
-    header: '',
+function normalizeTodoItem(value: unknown): TodoItem | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  const id = typeof record.id === 'string' ? record.id.trim() : '';
+  const content = typeof record.content === 'string' ? record.content.trim() : '';
+  const status = typeof record.status === 'string' ? record.status.trim() : '';
+  const priority = typeof record.priority === 'string' ? record.priority.trim() : '';
+  if (!id || !content) return null;
+  return {
+    id,
     content,
-    scroll: false,
-    scrollDistance: 0,
-    scrollDuration: 0,
-    html,
-    isWrite: false,
-    isMessage: false,
-    isTaskList: true,
-    toolKey: TASK_LIST_TOOL_KEY,
-    toolTitle: 'Tasks',
-    width: TASK_WINDOW_WIDTH,
-    height: TASK_WINDOW_HEIGHT,
-    zIndex: nextWindowZ(),
-  });
-}
-
-function pruneTasksForAllowedSessions() {
-  const allowed = allowedSessionIds.value;
-  if (!selectedSessionId.value || allowed.size === 0) {
-    tasksById.clear();
-    taskIdByMessageKey.clear();
-    taskIdByCallId.clear();
-    updateTaskListWindow();
-    return;
-  }
-  let didChange = false;
-  tasksById.forEach((task, id) => {
-    if (!allowed.has(task.sessionId)) {
-      removeTaskEntry(id);
-      didChange = true;
-    }
-  });
-  if (didChange || allowed.size > 0) updateTaskListWindow();
-}
-
-function removeTaskEntry(taskId: string) {
-  const existing = tasksById.get(taskId);
-  if (!existing) return;
-  tasksById.delete(taskId);
-  if (existing.messageId) {
-    const messageKey = buildMessageKey(existing.messageId, existing.sessionId);
-    if (taskIdByMessageKey.get(messageKey) === taskId) taskIdByMessageKey.delete(messageKey);
-  }
-  if (existing.callId && taskIdByCallId.get(existing.callId) === taskId) {
-    taskIdByCallId.delete(existing.callId);
-  }
-}
-
-function upsertTaskFromSubtask(update: Extract<TaskUpdate, { kind: 'subtask' }>) {
-  const messageKey = update.messageId ? buildMessageKey(update.messageId, update.sessionId) : undefined;
-  const existingId = messageKey ? taskIdByMessageKey.get(messageKey) : undefined;
-  const taskId = existingId ?? update.taskId ?? `subtask:${update.sessionId}:${Date.now()}`;
-  const existing = tasksById.get(taskId);
-  const content = update.content || existing?.content || '';
-  const next: TaskItem = {
-    id: taskId,
-    sessionId: update.sessionId,
-    messageId: update.messageId ?? existing?.messageId,
-    content,
-    status: existing?.status ?? 'pending',
-    source: existing?.source ?? 'subtask',
-    updatedAt: Date.now(),
-    subSessionId: existing?.subSessionId,
+    status: status || 'pending',
+    priority: priority || 'medium',
   };
-  tasksById.set(taskId, next);
-  if (messageKey) taskIdByMessageKey.set(messageKey, taskId);
 }
 
-function upsertTaskFromTool(update: Extract<TaskUpdate, { kind: 'tool' }>) {
-  const messageKey = update.messageId ? buildMessageKey(update.messageId, update.sessionId) : undefined;
-  const existingId =
-    (messageKey ? taskIdByMessageKey.get(messageKey) : undefined) ??
-    (update.callId ? taskIdByCallId.get(update.callId) : undefined);
-  const taskId = existingId ?? update.callId ?? `task:${update.sessionId}:${Date.now()}`;
-  const existing = tasksById.get(taskId);
-  const content = update.content || existing?.content || '';
-  if (update.status === 'completed' || update.status === 'cancelled') {
-    removeTaskEntry(taskId);
+function normalizeTodoItems(value: unknown) {
+  if (!Array.isArray(value)) return [] as TodoItem[];
+  return value.map((item) => normalizeTodoItem(item)).filter((item): item is TodoItem => Boolean(item));
+}
+
+async function reloadTodosForAllowedSessions() {
+  const requestId = ++todoReloadRequestId;
+  const sessionId = selectedSessionId.value;
+  const sessionIds = sessionId ? Array.from(allowedSessionIds.value) : [];
+  if (sessionIds.length === 0) {
+    todosBySessionId.value = {};
+    todoLoadingBySessionId.value = {};
+    todoErrorBySessionId.value = {};
     return;
   }
-  const next: TaskItem = {
-    id: taskId,
-    sessionId: update.sessionId,
-    messageId: update.messageId ?? existing?.messageId,
-    callId: update.callId ?? existing?.callId,
-    content,
-    status: update.status,
-    source: existing?.source ?? 'tool',
-    updatedAt: Date.now(),
-    subSessionId: update.subSessionId ?? existing?.subSessionId,
-  };
-  tasksById.set(taskId, next);
-  if (messageKey) taskIdByMessageKey.set(messageKey, taskId);
-  if (update.callId) taskIdByCallId.set(update.callId, taskId);
+  const directory = activeDirectory.value.trim() || undefined;
+  const loading: Record<string, boolean> = {};
+  sessionIds.forEach((id) => {
+    loading[id] = true;
+  });
+  todoLoadingBySessionId.value = loading;
+  const nextTodos: Record<string, TodoItem[]> = {};
+  const nextErrors: Record<string, string> = {};
+  await Promise.all(
+    sessionIds.map(async (id) => {
+      try {
+        const data = await opencodeApi.getSessionTodos(OPENCODE_BASE_URL, id, directory);
+        nextTodos[id] = normalizeTodoItems(data);
+      } catch (error) {
+        nextTodos[id] = [];
+        nextErrors[id] = toErrorMessage(error);
+      }
+    }),
+  );
+  if (requestId !== todoReloadRequestId) return;
+  todoLoadingBySessionId.value = {};
+  todoErrorBySessionId.value = nextErrors;
+  todosBySessionId.value = nextTodos;
 }
 
-function extractMessagePart(payload: unknown, eventType: string) {
+function extractTodoUpdated(payload: unknown, eventType: string) {
   if (!payload || typeof payload !== 'object') return null;
-  const normalized = normalizeEventType(eventType);
-  if (normalized !== 'messagepartupdated') return null;
   const record = payload as Record<string, unknown>;
   const nestedPayload =
     record.payload && typeof record.payload === 'object'
@@ -4250,95 +4176,23 @@ function extractMessagePart(payload: unknown, eventType: string) {
     (record.properties && typeof record.properties === 'object'
       ? (record.properties as Record<string, unknown>)
       : undefined);
-  const data =
-    (record.data as Record<string, unknown> | undefined) ??
-    nestedPayload ??
-    (record.result as Record<string, unknown> | undefined);
-  const messageObject =
-    (properties?.message as Record<string, unknown> | undefined) ??
-    (data?.message as Record<string, unknown> | undefined) ??
-    (record.message as Record<string, unknown> | undefined);
-  const part =
-    (properties?.part && typeof properties.part === 'object'
-      ? (properties.part as Record<string, unknown>)
-      : undefined) ??
-    (data?.part && typeof data.part === 'object' ? (data.part as Record<string, unknown>) : undefined) ??
-    (record.part && typeof record.part === 'object'
-      ? (record.part as Record<string, unknown>)
-      : undefined) ??
-    (messageObject?.part && typeof messageObject.part === 'object'
-      ? (messageObject.part as Record<string, unknown>)
-      : undefined);
-  return part ?? null;
-}
-
-function extractTaskUpdate(payload: unknown, eventType: string, fallbackSessionId?: string): TaskUpdate | null {
-  const part = extractMessagePart(payload, eventType);
-  if (!part) return null;
-  const type = typeof part.type === 'string' ? part.type : undefined;
-  const sessionId =
-    (typeof part.sessionID === 'string' && part.sessionID) ||
-    (typeof part.sessionId === 'string' && part.sessionId) ||
-    fallbackSessionId;
-  if (!sessionId) return null;
-  const messageId =
-    (typeof part.messageID === 'string' && part.messageID) ||
-    (typeof part.messageId === 'string' && part.messageId) ||
-    undefined;
-  if (type === 'subtask') {
-    const content =
-      (typeof part.description === 'string' && part.description) ||
-      (typeof part.prompt === 'string' && part.prompt) ||
-      '';
-    const taskId = typeof part.id === 'string' ? part.id : undefined;
-    return {
-      kind: 'subtask',
-      sessionId,
-      messageId,
-      taskId,
-      content: content.trim(),
-    };
-  }
-  if (type === 'tool') {
-    const tool = typeof part.tool === 'string' ? part.tool : undefined;
-    if (tool !== 'task') return null;
-    const callId =
-      (typeof part.callID === 'string' && part.callID) ||
-      (typeof part.callId === 'string' && part.callId) ||
-      undefined;
-    const state = part.state && typeof part.state === 'object' ? (part.state as Record<string, unknown>) : null;
-    const status = normalizeTaskStatus(typeof state?.status === 'string' ? (state.status as string) : undefined);
-    const input = state?.input && typeof state.input === 'object' ? (state.input as Record<string, unknown>) : null;
-    const content =
-      (typeof input?.description === 'string' && input.description) ||
-      (typeof input?.prompt === 'string' && input.prompt) ||
-      '';
-    const metadata =
-      part.metadata && typeof part.metadata === 'object'
-        ? (part.metadata as Record<string, unknown>)
-        : null;
-    const subSessionId =
-      metadata && typeof metadata.sessionId === 'string' ? (metadata.sessionId as string) : undefined;
-    return {
-      kind: 'tool',
-      sessionId,
-      messageId,
-      callId,
-      content: content.trim(),
-      status,
-      subSessionId,
-    };
-  }
-  return null;
-}
-
-function applyTaskUpdate(update: TaskUpdate) {
-  if (update.kind === 'subtask') {
-    upsertTaskFromSubtask(update);
-  } else {
-    upsertTaskFromTool(update);
-  }
-  updateTaskListWindow();
+  const type =
+    (record.type as string | undefined) ??
+    (record.event as string | undefined) ??
+    (nestedPayload?.type as string | undefined) ??
+    eventType;
+  if (!type) return null;
+  const normalized = normalizeEventType(type);
+  if (normalized !== 'todoupdated') return null;
+  const sessionID =
+    (typeof properties?.sessionID === 'string' && properties.sessionID) ||
+    (typeof properties?.sessionId === 'string' && properties.sessionId) ||
+    extractSessionId(payload);
+  if (!sessionID) return null;
+  return {
+    sessionID,
+    todos: normalizeTodoItems(properties?.todos),
+  };
 }
 
 function guessLanguage(path?: string, eventType?: string) {
@@ -6450,9 +6304,17 @@ function connect() {
     const canRenderSession = Boolean(selectedSessionId.value);
     if (!canRenderSession) return;
 
-    const taskUpdate = extractTaskUpdate(payload, resolvedEventType, sessionId);
-    if (taskUpdate) {
-      applyTaskUpdate(taskUpdate);
+    const todoUpdate = extractTodoUpdated(payload, resolvedEventType);
+    if (todoUpdate && allowedSessionIds.value.has(todoUpdate.sessionID)) {
+      todosBySessionId.value = {
+        ...todosBySessionId.value,
+        [todoUpdate.sessionID]: todoUpdate.todos,
+      };
+      if (todoErrorBySessionId.value[todoUpdate.sessionID]) {
+        const nextErrors = { ...todoErrorBySessionId.value };
+        delete nextErrors[todoUpdate.sessionID];
+        todoErrorBySessionId.value = nextErrors;
+      }
     }
 
     const ptyEvent = extractPtyEvent(payload, resolvedEventType);
@@ -6772,13 +6634,10 @@ function connect() {
 }
 
 onMounted(() => {
-  syncCanvasTermMetrics();
+  handleWindowResize();
   if (typeof document !== 'undefined' && 'fonts' in document) {
     void document.fonts.ready.then(() => {
-      syncCanvasTermMetrics();
-      shellSessionsByPtyId.forEach((_, ptyId) => {
-        scheduleShellFit(ptyId);
-      });
+      handleWindowResize();
     });
   }
   hydrateShellPtyStorage();
@@ -6836,13 +6695,13 @@ onMounted(() => {
     });
   window.addEventListener('pointermove', handlePointerMove);
   window.addEventListener('pointerup', handlePointerUp);
-  window.addEventListener('resize', syncCanvasTermMetrics);
+  window.addEventListener('resize', handleWindowResize);
   connect();
 });
 onBeforeUnmount(() => {
   window.removeEventListener('pointermove', handlePointerMove);
   window.removeEventListener('pointerup', handlePointerUp);
-  window.removeEventListener('resize', syncCanvasTermMetrics);
+  window.removeEventListener('resize', handleWindowResize);
   pendingToolScrollFrames.forEach((frame) => {
     cancelAnimationFrame(frame);
   });
@@ -6868,17 +6727,22 @@ onBeforeUnmount(() => {
 
 .app-header {
   flex: 0 0 auto;
+  position: relative;
+  z-index: 30;
 }
 
 .app-output {
   flex: 1 1 auto;
   min-height: 0;
   position: relative;
+  z-index: 10;
+  isolation: isolate;
 }
 
 .app-input {
   flex: 0 0 auto;
   position: relative;
+  z-index: 30;
   display: flex;
   flex-direction: column;
   align-items: stretch;
@@ -6917,7 +6781,7 @@ onBeforeUnmount(() => {
   position: relative;
   height: 100%;
   min-height: 0;
-  overflow: hidden;
+  overflow: visible;
   display: flex;
   flex-direction: column;
   gap: 0;
@@ -6928,6 +6792,31 @@ onBeforeUnmount(() => {
   flex: 1 1 auto;
   min-height: 0;
   box-sizing: border-box;
+  --todo-panel-gap: 10px;
+  --todo-panel-open-width: clamp(220px, 24vw, 320px);
+  --todo-panel-collapsed-width: 30px;
+  --todo-panel-width: var(--todo-panel-open-width);
+}
+
+.tool-window-layer.todo-collapsed {
+  --todo-panel-width: var(--todo-panel-collapsed-width);
+}
+
+.output-split {
+  position: relative;
+  z-index: 10;
+  display: flex;
+  align-items: stretch;
+  gap: var(--todo-panel-gap);
+  width: 100%;
+  height: 100%;
+  min-height: 0;
+}
+
+.todo-panel {
+  flex: 0 0 var(--todo-panel-width);
+  width: var(--todo-panel-width);
+  min-height: 0;
 }
 
 .tool-window-canvas {
@@ -6936,8 +6825,8 @@ onBeforeUnmount(() => {
   width: 100%;
   height: 100%;
   pointer-events: none;
-  overflow: hidden;
-  z-index: 5;
+  overflow: visible;
+  z-index: 20;
   --dock-reserved: 0px;
   --tool-top-offset: 0px;
   --tool-area-height: 100%;
@@ -6951,7 +6840,8 @@ onBeforeUnmount(() => {
 }
 
 .output-panel {
-  width: 100%;
+  flex: 1 1 auto;
+  width: auto;
   height: 100%;
   min-height: 0;
 }
