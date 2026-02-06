@@ -20,108 +20,46 @@
       />
     </header>
     <main ref="outputEl" class="app-output">
-      <div class="output-stage">
-        <div class="output-stack">
-          <OutputDock
-            ref="outputDock"
-            class="output-dock"
+      <div class="output-workspace">
+        <div class="tool-window-layer">
+          <OutputPanel
+            ref="outputPanelRef"
+            class="output-panel"
             :queue="queue"
             :is-following="isFollowing"
             :status-text="statusText"
             :is-status-error="isStatusError"
             :is-thinking="isThinking"
             :is-retry-status="!!retryStatus"
-            @scroll="handleMessageDockScroll"
-            @wheel="handleMessageDockWheel"
-            @touchmove="handleMessageDockScroll"
+            @scroll="handleOutputPanelScroll"
+            @wheel="handleOutputPanelWheel"
+            @touchmove="handleOutputPanelScroll"
             @resume-follow="resumeFollow"
             @fork-message="handleForkMessage"
             @revert-message="handleRevertMessage"
           />
-          <div ref="canvasEl" class="canvas">
+          <div ref="toolWindowCanvasEl" class="tool-window-canvas">
             <TransitionGroup appear name="fade">
-              <div
+              <ToolWindow
                 v-for="q in queue.filter((entry) => !entry.isMessage || entry.isSubagentMessage)"
                 :key="q.permissionId ?? q.questionId ?? q.callId ?? q.messageId ?? q.time"
-                class="term"
-                @pointerdown.capture="focusTerm(q, $event)"
-                :data-tool-key="q.toolKey ?? q.callId ?? undefined"
-                :data-message-key="q.messageId ? buildMessageKey(q.messageId, q.sessionId) : undefined"
-                :class="{
-                  'is-write': q.isWrite,
-                  'is-message': q.isSubagentMessage,
-                  'agent-tone-build': q.isMessage && resolveAgentTone(q.messageAgent) === 'build',
-                  'agent-tone-plan': q.isMessage && resolveAgentTone(q.messageAgent) === 'plan',
-                  'agent-tone-neutral': q.isMessage && resolveAgentTone(q.messageAgent) === 'neutral',
-                  'is-apply-patch': q.toolName === 'apply_patch',
-                  'is-reasoning': q.isReasoning || q.isSubagentMessage,
-                  'is-shell': q.isShell,
-                  'is-permission': q.isPermission,
-                  'is-question': q.isQuestion,
-                  'is-tasklist': q.isTaskList,
-                }"
-                :style="{
-                  left: `${q.x ?? 0}px`,
-                  top: `calc(var(--tool-top-offset) + ${q.y ?? 0}px)`,
-                  '--term-width': q.width ? `${q.width}px` : undefined,
-                  '--term-height': q.height ? `${q.height}px` : undefined,
-                  zIndex: q.zIndex ?? undefined,
-                }"
-              >
-                <div class="term-titlebar" @pointerdown="startTermDrag(q, $event)">
-                  {{ getEntryTitle(q) }}
-                </div>
-                <div
-                  class="term-inner"
-                  :class="{ 'is-scrolling': q.scroll }"
-                  :style="{
-                    '--scroll-distance': `${q.scrollDistance}px`,
-                    '--scroll-duration': `${q.scrollDuration}s`,
-                  }"
-                  @scroll="handleFloatingScroll(q, $event)"
-                  @wheel="handleFloatingWheel(q, $event)"
-                >
-                  <div v-if="q.isShell" class="xterm-host" :data-shell-id="q.shellId"></div>
-                  <PermissionWindow
-                    v-else-if="q.isPermission && q.permissionRequest"
-                    :request="q.permissionRequest"
-                    :is-submitting="isPermissionSubmitting(q.permissionRequest.id)"
-                    :error="getPermissionError(q.permissionRequest.id)"
-                    @reply="handlePermissionReply"
-                  />
-                  <QuestionWindow
-                    v-else-if="q.isQuestion && q.questionRequest"
-                    :request="q.questionRequest"
-                    :is-submitting="isQuestionSubmitting(q.questionRequest.id)"
-                    :error="getQuestionError(q.questionRequest.id)"
-                    @reply="handleQuestionReply"
-                    @reject="handleQuestionReject"
-                  />
-                <div
-                  v-else
-                  class="shiki-host"
-                  :class="{
-                    'is-message': q.isSubagentMessage,
-                    'no-gutter': q.toolGutterMode === 'none',
-                    'grep-gutter': q.toolGutterMode === 'grep-source',
-                    'wrap-soft': q.toolWrapMode === 'soft',
-                  }"
-                  v-html="q.html"
-                ></div>
-                </div>
-                <div
-                  v-if="
-                    q.isReasoning ||
-                    q.isSubagentMessage ||
-                    q.isShell ||
-                    q.isPermission ||
-                    q.isQuestion ||
-                    q.isTaskList
-                  "
-                  class="term-resizer"
-                  @pointerdown="startTermResize(q, $event)"
-                ></div>
-              </div>
+                :entry="q"
+                :get-entry-title="getEntryTitle"
+                :resolve-agent-tone="resolveAgentTone"
+                :build-message-key="buildMessageKey"
+                :on-focus-entry="focusTerm"
+                :on-drag-entry="startTermDrag"
+                :on-resize-entry="startTermResize"
+                :on-floating-scroll-entry="handleFloatingScroll"
+                :on-floating-wheel-entry="handleFloatingWheel"
+                :is-permission-submitting="isPermissionSubmitting"
+                :get-permission-error="getPermissionError"
+                :on-permission-reply="handlePermissionReply"
+                :is-question-submitting="isQuestionSubmitting"
+                :get-question-error="getQuestionError"
+                :on-question-reply="handleQuestionReply"
+                :on-question-reject="handleQuestionReject"
+              />
             </TransitionGroup>
           </div>
         </div>
@@ -133,7 +71,7 @@
       :style="inputHeight !== null ? { height: `${inputHeight}px` } : undefined"
     >
       <div class="input-resizer" @pointerdown="startInputResize"></div>
-      <ControlPanel
+      <InputPanel
         :can-send="canSend"
         :agent-options="agentOptions"
         :has-agent-options="hasAgentOptions"
@@ -170,12 +108,13 @@ import { computed, nextTick, onBeforeUnmount, onMounted, ref, shallowRef, watch 
 import { bundledLanguages, bundledThemes, createHighlighter } from 'shiki/bundle/web';
 import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
-import ControlPanel from './ControlPanel.vue';
-import TopPanel from './TopPanel.vue';
-import OutputDock from './OutputDock.vue';
-import ProjectPicker from './ProjectPicker.vue';
-import PermissionWindow from './PermissionWindow.vue';
-import QuestionWindow from './QuestionWindow.vue';
+import InputPanel from './components/InputPanel.vue';
+import OutputPanel from './components/OutputPanel.vue';
+import ProjectPicker from './components/ProjectPicker.vue';
+import ToolWindow from './components/ToolWindow.vue';
+import TopPanel from './components/TopPanel.vue';
+import { useOutputPanelFollow } from './composables/useOutputPanelFollow';
+import * as opencodeApi from './utils/opencode';
 
 const OPENCODE_BASE_URL = 'http://localhost:4096';
 const HISTORY_LIMIT = 60;
@@ -398,9 +337,21 @@ const queue = ref<FileReadEntry[]>([]);
 const appEl = ref<HTMLDivElement | null>(null);
 const outputEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLElement | null>(null);
-const canvasEl = ref<HTMLDivElement | null>(null);
-const outputDock = ref<{ dockEl: HTMLDivElement | null } | null>(null);
+const toolWindowCanvasEl = ref<HTMLDivElement | null>(null);
+const outputPanelRef = ref<{ panelEl: HTMLDivElement | null } | null>(null);
 const isFollowing = ref(true);
+const {
+  scrollToBottom,
+  updateFollowState,
+  handleOutputPanelScroll,
+  handleOutputPanelWheel,
+  scheduleFollowScroll,
+  resumeFollow,
+} = useOutputPanelFollow({
+  outputPanelRef,
+  isFollowing,
+  followThresholdPx: FOLLOW_THRESHOLD_PX,
+});
 const runningToolIds = new Set<string>();
 const subagentSessionExpiry = new Map<string, number>();
 const messageSummaryTitleById = new Map<string, string>();
@@ -1088,7 +1039,7 @@ function getTerminalWindowSize() {
 }
 
 function syncCanvasTermMetrics() {
-  const canvas = canvasEl.value;
+  const canvas = toolWindowCanvasEl.value;
   if (!canvas) return;
   const { width, height } = getTerminalWindowSize();
   canvas.style.setProperty('--term-font-family', TERM_FONT_FAMILY);
@@ -1103,7 +1054,7 @@ function bringToFront(entry: FileReadEntry) {
 }
 
 function getCanvasMetrics() {
-  const canvas = canvasEl.value;
+  const canvas = toolWindowCanvasEl.value;
   if (!canvas) return null;
   const canvasRect = canvas.getBoundingClientRect();
   const styles = getComputedStyle(canvas);
@@ -1656,7 +1607,7 @@ function scheduleReasoningClose(sessionId?: string) {
 function scheduleReasoningScroll(messageKey: string) {
   nextTick(() => {
     requestAnimationFrame(() => {
-      const canvas = canvasEl.value;
+      const canvas = toolWindowCanvasEl.value;
       if (!canvas) return;
       const entry = queue.value.find((item) => item.messageKey === messageKey);
       if (entry && entry.follow === false) return;
@@ -1704,7 +1655,7 @@ function scheduleToolScrollAnimation(toolKey: string) {
   nextTick(() => {
     const frame = requestAnimationFrame(() => {
       pendingToolScrollFrames.delete(toolKey);
-      const canvas = canvasEl.value;
+      const canvas = toolWindowCanvasEl.value;
       if (!canvas) return;
       const term = canvas.querySelector(
         `[data-tool-key="${toolKey}"] .term-inner`,
@@ -1792,9 +1743,7 @@ function removeSessionFromGraph(sessionId: string) {
 
 async function fetchHomePath() {
   try {
-    const response = await fetch(`${OPENCODE_BASE_URL}/path`);
-    if (!response.ok) return;
-    const data = (await response.json()) as { home?: string };
+    const data = (await opencodeApi.getPathInfo(OPENCODE_BASE_URL)) as { home?: string };
     if (typeof data.home === 'string' && data.home.trim()) {
       homePath.value = data.home.trim();
     }
@@ -1806,13 +1755,7 @@ async function fetchHomePath() {
 async function fetchProjects(directory?: string) {
   projectError.value = '';
   try {
-    const params = new URLSearchParams();
-    if (directory) params.set('directory', directory);
-    const query = params.toString();
-    const url = `${OPENCODE_BASE_URL}/project${query ? `?${query}` : ''}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Project request failed (${response.status})`);
-    const data = (await response.json()) as ProjectInfo[];
+    const data = (await opencodeApi.listProjects(OPENCODE_BASE_URL, directory)) as ProjectInfo[];
     projects.value = Array.isArray(data) ? data : [];
   } catch (error) {
     projectError.value = `Project load failed: ${toErrorMessage(error)}`;
@@ -1830,14 +1773,7 @@ function upsertProject(next: ProjectInfo) {
 
 async function fetchCurrentProject(directory?: string) {
   try {
-    const params = new URLSearchParams();
-    if (directory) params.set('directory', directory);
-    const query = params.toString();
-    const response = await fetch(
-      `${OPENCODE_BASE_URL}/project/current${query ? `?${query}` : ''}`,
-    );
-    if (!response.ok) return null;
-    const data = (await response.json()) as ProjectInfo;
+    const data = (await opencodeApi.getCurrentProject(OPENCODE_BASE_URL, directory)) as ProjectInfo;
     return data && typeof data.id === 'string' ? data : null;
   } catch {
     return null;
@@ -1875,16 +1811,7 @@ async function listSessionsByDirectory(options: {
 } = {}) {
   sessionError.value = '';
   try {
-    const params = new URLSearchParams();
-    if (options.directory) params.set('directory', options.directory);
-    if (options.roots) params.set('roots', 'true');
-    if (options.search) params.set('search', options.search);
-    if (options.limit) params.set('limit', String(options.limit));
-    const query = params.toString();
-    const url = `${OPENCODE_BASE_URL}/session${query ? `?${query}` : ''}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Session request failed (${response.status})`);
-    const data = (await response.json()) as SessionInfo[];
+    const data = (await opencodeApi.listSessions(OPENCODE_BASE_URL, options)) as SessionInfo[];
     return Array.isArray(data) ? data : [];
   } catch (error) {
     const message = `Session load failed: ${toErrorMessage(error)}`;
@@ -1909,11 +1836,7 @@ async function fetchWorktrees(directory?: string) {
   }
   try {
     const baseDir = directory.trim();
-    const params = new URLSearchParams();
-    params.set('directory', baseDir);
-    const response = await fetch(`${OPENCODE_BASE_URL}/experimental/worktree?${params.toString()}`);
-    if (!response.ok) throw new Error(`Worktree request failed (${response.status})`);
-    const data = (await response.json()) as unknown;
+    const data = await opencodeApi.listWorktrees(OPENCODE_BASE_URL, baseDir);
     const list = Array.isArray(data)
       ? data.filter((entry): entry is string => typeof entry === 'string')
       : [];
@@ -1934,10 +1857,7 @@ async function fetchWorktreeMeta(directory: string) {
   const requestId = ++worktreeMetaRequestId;
   worktreeMetaRequestIdByDir.set(normalized, requestId);
   try {
-    const params = new URLSearchParams({ directory: trimmed });
-    const response = await fetch(`${OPENCODE_BASE_URL}/vcs?${params.toString()}`);
-    if (!response.ok) return;
-    const data = (await response.json()) as VcsInfo;
+    const data = (await opencodeApi.getVcsInfo(OPENCODE_BASE_URL, trimmed)) as VcsInfo;
     if (!data || typeof data.branch !== 'string') return;
     if (worktreeMetaRequestIdByDir.get(normalized) !== requestId) return;
     worktreeMetaByDir.value = {
@@ -2007,19 +1927,10 @@ async function createWorktree() {
     return;
   }
   try {
-    const params = new URLSearchParams();
-    params.set('directory', selectedProjectDirectory.value);
-    const query = params.toString();
-    const response = await fetch(
-      `${OPENCODE_BASE_URL}/experimental/worktree${query ? `?${query}` : ''}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      },
-    );
-    if (!response.ok) throw new Error(`Worktree create failed (${response.status})`);
-    const data = (await response.json()) as WorktreeInfo;
+    const data = (await opencodeApi.createWorktree(
+      OPENCODE_BASE_URL,
+      selectedProjectDirectory.value,
+    )) as WorktreeInfo;
     if (data && typeof data.directory === 'string') {
       if (!worktrees.value.includes(data.directory)) {
         worktrees.value.unshift(data.directory);
@@ -2043,18 +1954,7 @@ async function deleteWorktree(directory: string) {
   const targetDir = directory.replace(/\/+$/, '');
   if (baseDir && targetDir === baseDir) return;
   try {
-    const params = new URLSearchParams();
-    params.set('directory', selectedProjectDirectory.value);
-    const query = params.toString();
-    const response = await fetch(
-      `${OPENCODE_BASE_URL}/experimental/worktree${query ? `?${query}` : ''}`,
-      {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ directory: targetDir }),
-      },
-    );
-    if (!response.ok) throw new Error(`Worktree delete failed (${response.status})`);
+    await opencodeApi.deleteWorktree(OPENCODE_BASE_URL, selectedProjectDirectory.value, targetDir);
     if (normalizeDirectory(selectedWorktreeDir.value) === targetDir) selectedWorktreeDir.value = '';
     void fetchWorktrees(selectedProjectDirectory.value || undefined);
   } catch (error) {
@@ -2069,16 +1969,10 @@ function openProjectPicker() {
 async function createNewSession() {
   sessionError.value = '';
   try {
-    const params = new URLSearchParams();
-    if (activeDirectory.value) params.set('directory', activeDirectory.value);
-    const query = params.toString();
-    const response = await fetch(`${OPENCODE_BASE_URL}/session${query ? `?${query}` : ''}`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({}),
-    });
-    if (!response.ok) throw new Error(`Session create failed (${response.status})`);
-    const data = (await response.json()) as SessionInfo;
+    const data = (await opencodeApi.createSession(
+      OPENCODE_BASE_URL,
+      activeDirectory.value || undefined,
+    )) as SessionInfo;
     if (data && typeof data.id === 'string') {
       const matchesDirectory =
         !data.directory || data.directory === selectedWorktreeDir.value || !selectedWorktreeDir.value;
@@ -2101,14 +1995,8 @@ async function deleteSession(sessionId: string) {
   sessionError.value = '';
   if (!sessionId) return;
   try {
-    const params = new URLSearchParams();
     const directory = activeDirectory.value.trim();
-    if (directory) params.set('directory', directory);
-    const query = params.toString();
-    const response = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}${query ? `?${query}` : ''}`, {
-      method: 'DELETE',
-    });
-    if (!response.ok) throw new Error(`Session delete failed (${response.status})`);
+    await opencodeApi.deleteSession(OPENCODE_BASE_URL, sessionId, directory || undefined);
     if (selectedSessionId.value === sessionId) selectedSessionId.value = '';
     removeSessionFromGraph(sessionId);
     sessions.value = sessions.value.filter((session) => session.id !== sessionId);
@@ -2120,19 +2008,14 @@ async function deleteSession(sessionId: string) {
 
 async function handleForkMessage(payload: { sessionId: string; messageId: string }) {
   sessionError.value = '';
-  const params = new URLSearchParams({ directory: activeDirectory.value.trim() });
   try {
     sendStatus.value = 'Forking...';
-    const response = await fetch(
-      `${OPENCODE_BASE_URL}/session/${payload.sessionId}/fork?${params.toString()}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messageID: payload.messageId }),
-      },
-    );
-    if (!response.ok) throw new Error(`Session fork failed (${response.status})`);
-    const data = (await response.json()) as SessionInfo;
+    const data = (await opencodeApi.forkSession(
+      OPENCODE_BASE_URL,
+      payload.sessionId,
+      payload.messageId,
+      activeDirectory.value.trim() || undefined,
+    )) as SessionInfo;
     if (data && typeof data.id === 'string') {
       upsertSessionGraph(data);
       const exists = sessions.value.some((session) => session.id === data.id);
@@ -2151,18 +2034,14 @@ async function handleForkMessage(payload: { sessionId: string; messageId: string
 
 async function handleRevertMessage(payload: { sessionId: string; messageId: string }) {
   sessionError.value = '';
-  const params = new URLSearchParams({ directory: activeDirectory.value.trim() });
   try {
     sendStatus.value = 'Reverting...';
-    const response = await fetch(
-      `${OPENCODE_BASE_URL}/session/${payload.sessionId}/revert?${params.toString()}`,
-      {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ messageID: payload.messageId }),
-      },
+    await opencodeApi.revertSession(
+      OPENCODE_BASE_URL,
+      payload.sessionId,
+      payload.messageId,
+      activeDirectory.value.trim() || undefined,
     );
-    if (!response.ok) throw new Error(`Session revert failed (${response.status})`);
     sendStatus.value = 'Reverted.';
     if (selectedSessionId.value === payload.sessionId) reloadSelectedSessionState();
     void refreshSessionsForDirectory(activeDirectory.value || undefined);
@@ -2286,9 +2165,7 @@ async function fetchProviders() {
   providersFetchCount.value += 1;
   log('providers fetch start', providersFetchCount.value);
   try {
-    const response = await fetch(`${OPENCODE_BASE_URL}/config/providers`);
-    if (!response.ok) throw new Error(`Provider request failed (${response.status})`);
-    const data = (await response.json()) as ProviderResponse;
+    const data = (await opencodeApi.listProviders(OPENCODE_BASE_URL)) as ProviderResponse;
     providers.value = Array.isArray(data.providers) ? data.providers : [];
     const models: Array<{
       id: string;
@@ -2356,9 +2233,7 @@ async function fetchAgents() {
   if (agentsLoading.value) return;
   agentsLoading.value = true;
   try {
-    const response = await fetch(`${OPENCODE_BASE_URL}/agent`);
-    if (!response.ok) throw new Error(`Agent request failed (${response.status})`);
-    const data = (await response.json()) as AgentInfo[];
+    const data = (await opencodeApi.listAgents(OPENCODE_BASE_URL)) as AgentInfo[];
     agents.value = Array.isArray(data) ? data : [];
     const options = agents.value
       .filter((agent) => agent.mode === 'primary')
@@ -2384,13 +2259,7 @@ async function fetchCommands(directory?: string) {
   if (commandsLoading.value) return;
   commandsLoading.value = true;
   try {
-    const params = new URLSearchParams();
-    if (directory) params.set('directory', directory);
-    const query = params.toString();
-    const url = `${OPENCODE_BASE_URL}/command${query ? `?${query}` : ''}`;
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Command request failed (${response.status})`);
-    const data = (await response.json()) as CommandInfo[];
+    const data = (await opencodeApi.listCommands(OPENCODE_BASE_URL, directory)) as CommandInfo[];
     const list = Array.isArray(data) ? data : [];
     list.sort((a, b) => a.name.localeCompare(b.name));
     commands.value = list;
@@ -2406,14 +2275,10 @@ async function fetchSessionStatus(directory?: string) {
   const selectedAtRequest = selectedSessionId.value;
   const directoryAtRequest = directory ?? '';
   try {
-    const params = new URLSearchParams();
-    if (directory) params.set('directory', directory);
-    const query = params.toString();
-    const response = await fetch(
-      `${OPENCODE_BASE_URL}/session/status${query ? `?${query}` : ''}`,
-    );
-    if (!response.ok) throw new Error(`Session status request failed (${response.status})`);
-    const data = (await response.json()) as Record<string, { type?: string }>;
+    const data = (await opencodeApi.getSessionStatusMap(
+      OPENCODE_BASE_URL,
+      directory,
+    )) as Record<string, { type?: string }>;
     if (requestId !== sessionStatusRequestId) return;
     if (selectedAtRequest !== selectedSessionId.value) return;
     if (directoryAtRequest !== (activeDirectory.value || '')) return;
@@ -2439,12 +2304,7 @@ async function fetchSessionStatus(directory?: string) {
 
 async function fetchPendingPermissions(directory?: string) {
   try {
-    const params = new URLSearchParams();
-    if (directory) params.set('directory', directory);
-    const query = params.toString();
-    const response = await fetch(`${OPENCODE_BASE_URL}/permission${query ? `?${query}` : ''}`);
-    if (!response.ok) throw new Error(`Permission list failed (${response.status})`);
-    const data = (await response.json()) as unknown;
+    const data = await opencodeApi.listPendingPermissions(OPENCODE_BASE_URL, directory);
     if (!Array.isArray(data)) return;
     data
       .map((entry) => parsePermissionRequest(entry))
@@ -2460,12 +2320,7 @@ async function fetchPendingPermissions(directory?: string) {
 
 async function fetchPendingQuestions(directory?: string) {
   try {
-    const params = new URLSearchParams();
-    if (directory) params.set('directory', directory);
-    const query = params.toString();
-    const response = await fetch(`${OPENCODE_BASE_URL}/question${query ? `?${query}` : ''}`);
-    if (!response.ok) throw new Error(`Question list failed (${response.status})`);
-    const data = (await response.json()) as unknown;
+    const data = await opencodeApi.listPendingQuestions(OPENCODE_BASE_URL, directory);
     if (!Array.isArray(data)) return;
     data
       .map((entry) => parseQuestionRequest(entry))
@@ -2659,14 +2514,11 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
   const requestedDirectory = !isSubagentMessage ? getSelectedWorktreeDirectory() : '';
   try {
     const directory = getSelectedWorktreeDirectory();
-    const params = new URLSearchParams();
-    if (directory) params.set('directory', directory);
-    const query = params.toString();
-    const response = await fetch(
-      `${OPENCODE_BASE_URL}/session/${sessionId}/message${query ? `?${query}` : ''}`,
-    );
-    if (!response.ok) throw new Error(`History request failed (${response.status})`);
-    const data = (await response.json()) as Array<Record<string, unknown>>;
+    const data = (await opencodeApi.listSessionMessages(
+      OPENCODE_BASE_URL,
+      sessionId,
+      directory || undefined,
+    )) as Array<Record<string, unknown>>;
     if (!Array.isArray(data)) return;
     if (!isSubagentMessage) {
       if (requestId !== primaryHistoryRequestId) return;
@@ -2784,19 +2636,8 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
   }
 }
 
-function buildPtyUrl(path: string, directory?: string) {
-  const params = new URLSearchParams();
-  if (directory) params.set('directory', directory);
-  const query = params.toString();
-  return `${OPENCODE_BASE_URL}${path}${query ? `?${query}` : ''}`;
-}
-
 function buildPtyWsUrl(path: string, directory?: string) {
-  const base = OPENCODE_BASE_URL.replace(/^http/, 'ws');
-  const params = new URLSearchParams();
-  if (directory) params.set('directory', directory);
-  const query = params.toString();
-  return `${base}${path}${query ? `?${query}` : ''}`;
+  return opencodeApi.createWsUrl(OPENCODE_BASE_URL, path, { directory });
 }
 
 function parsePtyInfo(value: unknown): PtyInfo | null {
@@ -2814,42 +2655,29 @@ function parsePtyInfo(value: unknown): PtyInfo | null {
 }
 
 async function fetchPtyList(directory?: string) {
-  const url = buildPtyUrl('/pty', directory);
-  const response = await fetch(url);
-  if (!response.ok) throw new Error(`PTY list failed (${response.status})`);
-  const data = (await response.json()) as unknown;
+  const data = await opencodeApi.listPtys(OPENCODE_BASE_URL, directory);
   if (!Array.isArray(data)) return [] as PtyInfo[];
   return data.map(parsePtyInfo).filter((pty): pty is PtyInfo => Boolean(pty));
 }
 
 async function createPtySession(sessionId: string, command?: string, args?: string[]) {
   const directory = activeDirectory.value || undefined;
-  const url = buildPtyUrl('/pty', directory);
-  const body = {
+  const data = await opencodeApi.createPty(OPENCODE_BASE_URL, {
+    directory,
     command,
     args,
     cwd: directory,
     title: `Shell (${sessionId.slice(0, 6)})`,
-  };
-  const response = await fetch(url, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
   });
-  if (!response.ok) throw new Error(`PTY create failed (${response.status})`);
-  const data = (await response.json()) as unknown;
   return parsePtyInfo(data);
 }
 
 async function updatePtySize(ptyId: string, rows: number, cols: number, directory?: string) {
-  const url = buildPtyUrl(`/pty/${ptyId}`, directory);
-  const response = await fetch(url, {
-    method: 'PUT',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ size: { rows, cols } }),
+  const data = await opencodeApi.updatePtySize(OPENCODE_BASE_URL, ptyId, {
+    directory,
+    rows,
+    cols,
   });
-  if (!response.ok) throw new Error(`PTY resize failed (${response.status})`);
-  const data = (await response.json()) as unknown;
   return parsePtyInfo(data);
 }
 
@@ -2901,7 +2729,7 @@ function ensureShellWindow(pty: PtyInfo, sessionId: string, options: { preserve?
     sessionId,
   });
   nextTick(() => {
-    const host = canvasEl.value?.querySelector(
+    const host = toolWindowCanvasEl.value?.querySelector(
       `[data-shell-id="${pty.id}"]`,
     ) as HTMLElement | null;
     if (!host) return;
@@ -3335,24 +3163,15 @@ function runDebugTool(tool: string) {
 }
 
 async function sendCommand(sessionId: string, command: CommandInfo, commandArgs: string) {
-  const params = new URLSearchParams();
   const directory = activeDirectory.value.trim();
-  if (directory) params.set('directory', directory);
-  const query = params.toString();
-  const response = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}/command${query ? `?${query}` : ''}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify({
-      command: command.name,
-      arguments: commandArgs,
-      agent: command.agent || selectedMode.value,
-      model: command.model || selectedModel.value,
-      variant: selectedThinking.value,
-    }),
+  await opencodeApi.sendCommand(OPENCODE_BASE_URL, sessionId, {
+    directory: directory || undefined,
+    command: command.name,
+    arguments: commandArgs,
+    agent: command.agent || selectedMode.value,
+    model: command.model || selectedModel.value,
+    variant: selectedThinking.value,
   });
-  if (!response.ok) throw new Error(`Command failed (${response.status})`);
 }
 
 async function sendMessage() {
@@ -3404,7 +3223,6 @@ async function sendMessage() {
     }
     const directory = requireSelectedWorktree('send');
     if (!directory) return;
-    const params = new URLSearchParams({ directory });
     const parts = [] as Array<Record<string, unknown>>;
     if (hasText) parts.push({ type: 'text', text });
     if (hasAttachments) {
@@ -3417,25 +3235,16 @@ async function sendMessage() {
         })),
       );
     }
-    const response = await fetch(
-      `${OPENCODE_BASE_URL}/session/${sessionId}/prompt_async?${params.toString()}`,
-      {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
+    await opencodeApi.sendPromptAsync(OPENCODE_BASE_URL, sessionId, {
+      directory,
+      agent: selectedMode.value,
+      model: {
+        providerID: selectedInfo?.providerID,
+        modelID: selectedModel.value,
       },
-      body: JSON.stringify({
-        agent: selectedMode.value,
-        model: {
-          providerID: selectedInfo?.providerID,
-          modelID: selectedModel.value,
-        },
-        variant: selectedThinking.value,
-        parts,
-      }),
-      },
-    );
-    if (!response.ok) throw new Error(`Send failed (${response.status})`);
+      variant: selectedThinking.value,
+      parts,
+    });
     sendStatus.value = 'Sent.';
     attachments.value = [];
   } catch (error) {
@@ -3452,11 +3261,7 @@ async function abortSession() {
   sendStatus.value = 'Stopping...';
   try {
     const directory = activeDirectory.value.trim();
-    const params = directory ? `?${new URLSearchParams({ directory }).toString()}` : '';
-    const response = await fetch(`${OPENCODE_BASE_URL}/session/${sessionId}/abort${params}`, {
-      method: 'POST',
-    });
-    if (!response.ok) throw new Error(`Abort failed (${response.status})`);
+    await opencodeApi.abortSession(OPENCODE_BASE_URL, sessionId, directory || undefined);
     sendStatus.value = 'Stopped.';
   } catch (error) {
     sendStatus.value = `Stop failed: ${toErrorMessage(error)}`;
@@ -5972,18 +5777,10 @@ function prunePermissionEntries() {
 
 async function sendPermissionReply(requestId: string, reply: PermissionReply) {
   const directory = activeDirectory.value.trim();
-  const params = new URLSearchParams();
-  if (directory) params.set('directory', directory);
-  const query = params.toString();
-  const response = await fetch(
-    `${OPENCODE_BASE_URL}/permission/${requestId}/reply${query ? `?${query}` : ''}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ reply }),
-    },
-  );
-  if (!response.ok) throw new Error(`Permission reply failed (${response.status})`);
+  await opencodeApi.replyPermission(OPENCODE_BASE_URL, requestId, {
+    directory: directory || undefined,
+    reply,
+  });
 }
 
 async function handlePermissionReply(payload: { requestId: string; reply: PermissionReply }) {
@@ -6117,33 +5914,15 @@ function normalizeQuestionAnswers(answers: QuestionAnswer[]) {
 
 async function sendQuestionReply(requestId: string, answers: QuestionAnswer[]) {
   const directory = activeDirectory.value.trim();
-  const params = new URLSearchParams();
-  if (directory) params.set('directory', directory);
-  const query = params.toString();
-  const response = await fetch(
-    `${OPENCODE_BASE_URL}/question/${requestId}/reply${query ? `?${query}` : ''}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ answers: normalizeQuestionAnswers(answers) }),
-    },
-  );
-  if (!response.ok) throw new Error(`Question reply failed (${response.status})`);
+  await opencodeApi.replyQuestion(OPENCODE_BASE_URL, requestId, {
+    directory: directory || undefined,
+    answers: normalizeQuestionAnswers(answers),
+  });
 }
 
 async function sendQuestionReject(requestId: string) {
   const directory = activeDirectory.value.trim();
-  const params = new URLSearchParams();
-  if (directory) params.set('directory', directory);
-  const query = params.toString();
-  const response = await fetch(
-    `${OPENCODE_BASE_URL}/question/${requestId}/reject${query ? `?${query}` : ''}`,
-    {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-    },
-  );
-  if (!response.ok) throw new Error(`Question reject failed (${response.status})`);
+  await opencodeApi.rejectQuestion(OPENCODE_BASE_URL, requestId, directory || undefined);
 }
 
 async function handleQuestionReply(payload: { requestId: string; answers: QuestionAnswer[] }) {
@@ -6513,46 +6292,6 @@ function upsertToolEntry(
   });
   if (entry.callId) toolIndexByCallId.set(entry.callId, queue.value.length - 1);
   scheduleToolScrollAnimation(toolKey);
-}
-
-function scrollToBottom() {
-  const dock = outputDock.value?.dockEl ?? null;
-  if (!dock) return;
-  dock.scrollTop = Math.max(0, dock.scrollHeight - dock.clientHeight);
-}
-
-function updateFollowState() {
-  const dock = outputDock.value?.dockEl ?? null;
-  if (!dock) return;
-  const distanceFromBottom = dock.scrollHeight - dock.scrollTop - dock.clientHeight;
-  isFollowing.value = distanceFromBottom <= FOLLOW_THRESHOLD_PX;
-}
-
-function handleMessageDockScroll() {
-  updateFollowState();
-}
-
-function handleMessageDockWheel(event: WheelEvent) {
-  if (event.deltaY < 0) {
-    isFollowing.value = false;
-    return;
-  }
-  updateFollowState();
-}
-
-function scheduleFollowScroll() {
-  if (!isFollowing.value) return;
-  nextTick(() => {
-    requestAnimationFrame(() => {
-      scrollToBottom();
-      updateFollowState();
-    });
-  });
-}
-
-function resumeFollow() {
-  isFollowing.value = true;
-  nextTick(scrollToBottom);
 }
 
 function registerGlobalEventHook(
@@ -7174,7 +6913,7 @@ onBeforeUnmount(() => {
   background: rgba(226, 232, 240, 0.7);
 }
 
-.output-stage {
+.output-workspace {
   position: relative;
   height: 100%;
   min-height: 0;
@@ -7184,14 +6923,14 @@ onBeforeUnmount(() => {
   gap: 0;
 }
 
-.output-stack {
+.tool-window-layer {
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
   box-sizing: border-box;
 }
 
-.canvas {
+.tool-window-canvas {
   position: absolute;
   inset: 0;
   width: 100%;
@@ -7211,523 +6950,10 @@ onBeforeUnmount(() => {
   --term-height: 386px;
 }
 
-.message-dock {
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
-  overscroll-behavior: contain;
-  scrollbar-gutter: stable;
-  position: relative;
-  background: rgba(15, 23, 42, 0.92);
-  color: #e2e8f0;
-  border: 1px solid #334155;
-  border-radius: 12px;
-  padding: 10px 12px;
-  box-shadow: 0 12px 32px rgba(2, 6, 23, 0.45);
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
-  font-size: 13px;
-}
-
-.follow-button {
-  position: sticky;
-  left: 50%;
-  bottom: 10px;
-  transform: translateX(-50%);
-  width: 36px;
-  height: 36px;
-  border-radius: 999px;
-  border: 1px solid #334155;
-  background: rgba(15, 23, 42, 0.92);
-  color: #e2e8f0;
-  font-size: 18px;
-  line-height: 1;
-  display: grid;
-  place-items: center;
-  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.45);
-  cursor: pointer;
-  align-self: center;
-  margin-top: 4px;
-  z-index: 2;
-}
-
-.follow-button:hover {
-  background: rgba(30, 41, 59, 0.98);
-}
-
-.thinking-indicator {
-  position: relative;
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 10px;
-  border-radius: 999px;
-  border: 1px solid #334155;
-  background: rgba(15, 23, 42, 0.92);
-  box-shadow: 0 10px 24px rgba(2, 6, 23, 0.45);
-  align-self: flex-start;
-  margin-top: 4px;
-}
-
-.thinking-dot {
-  width: 6px;
-  height: 6px;
-  border-radius: 999px;
-  background: #94a3b8;
-  animation: thinking-pulse 1.1s ease-in-out infinite;
-}
-
-.thinking-dot:nth-child(2) {
-  animation-delay: 0.15s;
-}
-
-.thinking-dot:nth-child(3) {
-  animation-delay: 0.3s;
-}
-
-@keyframes thinking-pulse {
-  0%,
-  100% {
-    transform: translateY(0);
-    opacity: 0.6;
-  }
-  50% {
-    transform: translateY(-2px);
-    opacity: 1;
-  }
-}
-
-.message-entry {
-  background: rgba(2, 6, 23, 0.6);
-  border: 1px solid #1e293b;
-  border-radius: 10px;
-  padding: 8px 10px;
-  max-width: 100%;
-  width: 100%;
-  box-sizing: border-box;
-}
-
-.message-entry.is-user {
-  background: rgba(37, 99, 235, 0.18);
-  border-color: rgba(59, 130, 246, 0.6);
-}
-
-.message-dock .message-inner.is-scrolling {
-  animation: none;
-}
-
-
-.term {
-  position: absolute;
-  font-size: var(--term-font-size);
-  --message-line-height: var(--term-line-height);
-  --term-border-color: #1f2937;
-  width: var(--term-width);
-  height: var(--term-height);
-  background: #050505;
-  color: #f3f4f6;
-  border: 1px solid #1f2937;
-  overflow: hidden;
-  font-family: var(--term-font-family);
-  line-height: var(--term-line-height);
-  padding: 0;
-  z-index: 12;
-  display: flex;
-  flex-direction: column;
-  pointer-events: auto;
-}
-
-.term.is-message {
-  background: #050505;
-  border-color: #1f2937;
-  --term-border-color: #1f2937;
-}
-
-.term.is-message .term-titlebar {
-  background: rgba(2, 6, 23, 0.95);
-  color: #cbd5e1;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
-}
-
-.term.is-message.agent-tone-build {
-  background: #050505;
-  border-color: #1f2937;
-  --term-border-color: #1f2937;
-}
-
-.term.is-message.agent-tone-build .term-titlebar {
-  background: rgba(2, 6, 23, 0.95);
-  color: #cbd5e1;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
-}
-
-.term.is-message.agent-tone-plan {
-  background: #050505;
-  border-color: #1f2937;
-  --term-border-color: #1f2937;
-}
-
-.term.is-message.agent-tone-plan .term-titlebar {
-  background: rgba(2, 6, 23, 0.95);
-  color: #cbd5e1;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
-}
-
-.term.is-shell {
-  background: #050505;
-  border-color: #1f2937;
-  --term-border-color: #1f2937;
-}
-
-.term.is-permission {
-  background: #1f1303;
-  border-color: #f59e0b;
-  --term-border-color: #f59e0b;
-}
-
-.term.is-question {
-  background: #07201b;
-  border-color: #34d399;
-  --term-border-color: #34d399;
-}
-
-.term.is-apply-patch,
-.term.is-write {
-  background: #190a24;
-  border-color: #a855f7;
-  --term-border-color: #a855f7;
-}
-
-.term.is-apply-patch .term-titlebar,
-.term.is-write .term-titlebar {
-  background: rgba(168, 85, 247, 0.18);
-  color: #e9d5ff;
-  border-bottom: 1px solid rgba(168, 85, 247, 0.35);
-}
-
-.term.is-tasklist {
-  background: #050505;
-  border-color: #1f2937;
-  --term-border-color: #1f2937;
-  color: #e2e8f0;
-}
-
-.term.is-permission .term-titlebar {
-  background: rgba(245, 158, 11, 0.18);
-  color: #fcd34d;
-  border-bottom: 1px solid rgba(245, 158, 11, 0.35);
-}
-
-.term.is-question .term-titlebar {
-  background: rgba(52, 211, 153, 0.18);
-  color: #6ee7b7;
-  border-bottom: 1px solid rgba(52, 211, 153, 0.35);
-}
-
-.term-titlebar {
-  height: 22px;
-  display: flex;
-  align-items: center;
-  padding: 0 10px;
-  font-size: 12px;
-  color: #cbd5e1;
-  background: rgba(2, 6, 23, 0.95);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
-  cursor: grab;
-  user-select: none;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-
-.term-titlebar:active {
-  cursor: grabbing;
-}
-
-.message-inner {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  --message-line-height: 1.2;
-  line-height: var(--message-line-height);
-}
-
-.message-inner.is-scrolling {
-  animation: scroll-down var(--scroll-duration) linear forwards;
-}
-
-.term-inner {
-  margin: 0;
-  white-space: normal;
-  line-height: var(--term-line-height);
-  padding: 2px;
-  flex: 1;
-  overflow: hidden;
-}
-
-.term.is-reasoning .term-inner {
-  overflow: auto;
-}
-
-.term.is-shell .term-inner {
-  padding: 0;
-  overflow: hidden;
-}
-
-.term.is-permission .term-inner {
-  padding: 0;
-  overflow: hidden;
-}
-
-.term.is-question .term-inner {
-  padding: 0;
-  overflow: hidden;
-}
-
-.term.is-tasklist .term-inner {
-  padding: 8px;
-  overflow: auto;
-}
-
-.tasklist {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tasklist-header {
-  font-size: 12px;
-  font-weight: 600;
-  color: #e2e8f0;
-}
-
-.tasklist-items {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-}
-
-.tasklist-item {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  font-size: 12px;
-  color: #e2e8f0;
-}
-
-.tasklist-status {
-  font-size: 10px;
-  letter-spacing: 0.06em;
-  text-transform: uppercase;
-  padding: 2px 6px;
-  border-radius: 999px;
-  background: rgba(148, 163, 184, 0.18);
-  color: #e2e8f0;
-  border: 1px solid rgba(148, 163, 184, 0.35);
-  white-space: nowrap;
-}
-
-.tasklist-item.is-running .tasklist-status {
-  background: rgba(16, 185, 129, 0.2);
-  color: #6ee7b7;
-  border-color: rgba(16, 185, 129, 0.5);
-}
-
-.tasklist-item.is-pending .tasklist-status {
-  background: rgba(245, 158, 11, 0.2);
-  color: #fcd34d;
-  border-color: rgba(245, 158, 11, 0.5);
-}
-
-.tasklist-text {
-  flex: 1;
-}
-
-.tasklist-session {
-  font-size: 11px;
-  color: #94a3b8;
-  margin-left: 4px;
-  white-space: nowrap;
-}
-
-.xterm-host {
+.output-panel {
   width: 100%;
   height: 100%;
-  display: block;
-}
-
-.term-resizer {
-  position: absolute;
-  right: 0;
-  bottom: 0;
-  width: 14px;
-  height: 14px;
-  cursor: se-resize;
-  background: transparent;
-  z-index: 2;
-}
-
-.term-resizer::before {
-  content: '';
-  position: absolute;
-  right: 1px;
-  bottom: 1px;
-  width: 0;
-  height: 0;
-  border-style: solid;
-  border-width: 0 0 5px 5px;
-  border-color: transparent transparent var(--term-border-color) transparent;
-}
-
-.term-resizer:hover {
-  filter: brightness(1.15);
-}
-
-.term :deep(pre.shiki),
-.term :deep(code),
-.term :deep(.line),
-.term :deep(.line)::before {
-  line-height: var(--term-line-height) !important;
-}
-
-
-.message-window :deep(pre.shiki),
-.message-window :deep(code),
-.message-window :deep(.line),
-.message-window :deep(.line)::before {
-  line-height: var(--message-line-height) !important;
-}
-
-.shiki-host :deep(pre),
-.shiki-host :deep(code) {
-  margin: 0;
-  padding: 0;
-  background: transparent !important;
-  background-color: transparent !important;
-  line-height: inherit !important;
-  font-family: inherit;
-  font-size: inherit;
-  white-space: normal;
-}
-
-.shiki-host :deep(pre.shiki) {
-  background: transparent !important;
-  background-color: transparent !important;
-  color: inherit;
-  display: block;
-  line-height: inherit !important;
-}
-
-.shiki-host :deep(.line),
-.shiki-host :deep(.line)::before {
-  line-height: inherit !important;
-}
-
-.shiki-host.is-message :deep(pre),
-.shiki-host.is-message :deep(code) {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.shiki-host :deep(pre) {
-  counter-reset: shiki-line;
-}
-
-.shiki-host :deep(.line) {
-  display: block;
-  padding-left: 3.2em;
-  position: relative;
-  min-height: 1em;
-  color: inherit;
-  white-space: pre;
-}
-
-.shiki-host.wrap-soft :deep(.line) {
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-  word-break: break-word;
-}
-
-.shiki-host :deep(.line:empty)::after {
-  content: ' ';
-}
-
-.shiki-host :deep(.line.line-added) {
-  background: rgba(46, 160, 67, 0.22);
-  box-shadow: inset 3px 0 0 #2ea043;
-  color: #aff5b4;
-}
-
-.shiki-host :deep(.line.line-removed) {
-  background: rgba(248, 81, 73, 0.2);
-  box-shadow: inset 3px 0 0 #f85149;
-  color: #ffdcd7;
-}
-
-.shiki-host :deep(.line.line-hunk) {
-  background: rgba(56, 139, 253, 0.18);
-  color: #c9d1d9;
-}
-
-.shiki-host :deep(.line.line-header) {
-  background: rgba(110, 118, 129, 0.18);
-  color: #c9d1d9;
-}
-
-.shiki-host :deep(.line)::before {
-  counter-increment: shiki-line;
-  content: counter(shiki-line);
-  position: absolute;
-  left: 0;
-  width: 2.6em;
-  text-align: right;
-  color: #8a8a8a;
-}
-
-.shiki-host.no-gutter :deep(.line) {
-  padding-left: 0;
-}
-
-.shiki-host.no-gutter :deep(.line)::before {
-  content: '';
-  counter-increment: none;
-  width: 0;
-}
-
-.shiki-host.grep-gutter :deep(.line)::before {
-  counter-increment: none;
-  content: attr(data-gutter);
-}
-
-.shiki-host.is-message :deep(.line) {
-  padding-left: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  min-height: var(--message-line-height);
-}
-
-.shiki-host.is-message :deep(.line)::before {
-  content: '';
-}
-
-.term-inner.is-scrolling .shiki-host {
-  animation: scroll-down var(--scroll-duration) linear forwards;
-  will-change: transform;
-}
-
-@keyframes scroll-down {
-  from {
-    transform: translateY(0);
-  }
-  to {
-    transform: translateY(calc(-1 * var(--scroll-distance)));
-  }
+  min-height: 0;
 }
 
 .fade-enter-active,
@@ -7738,17 +6964,6 @@ onBeforeUnmount(() => {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
-
   transform: scaleX(150%) scaleY(0%);
-}
-
-.shiki-host {
-  line-height: var(--term-line-height);
-  color: #c9d1d9;
-  display: block;
-}
-
-.shiki-host.is-message {
-  line-height: var(--message-line-height);
 }
 </style>

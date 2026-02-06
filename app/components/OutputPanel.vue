@@ -1,11 +1,11 @@
 <template>
-  <div class="dock">
+  <div class="output-panel-root">
     <div
-      class="message-dock"
+      class="output-panel-shell"
     >
       <div
-        ref="dockEl"
-        class="message-scroll"
+        ref="panelEl"
+        class="output-panel-scroll"
         @scroll="$emit('scroll')"
         @wheel="$emit('wheel', $event)"
         @touchmove="$emit('touchmove')"
@@ -13,7 +13,7 @@
       <div
         v-for="q in queue.filter((entry) => entry.isMessage && !entry.isSubagentMessage)"
         :key="q.messageId ?? q.time"
-        class="message-entry"
+        class="output-entry"
         :class="{
           'is-user': q.role === 'user',
           'is-user-build': q.role === 'user' && getAgentTone(q) === 'build',
@@ -23,12 +23,12 @@
       >
           <div
             v-if="q.role === 'user' && q.messageId && q.sessionId"
-            class="message-actions"
+            class="output-entry-actions"
           >
-            <button type="button" class="message-action" @click="confirmFork(q)">fork</button>
+            <button type="button" class="output-entry-action" @click="confirmFork(q)">fork</button>
             <button
               type="button"
-              class="message-action message-action-danger"
+              class="output-entry-action output-entry-action-danger"
               @click="confirmRevert(q)"
             >
               revert
@@ -36,12 +36,12 @@
           </div>
           <div
             v-if="q.role === 'user' && formatMessageAgent(q)"
-            class="message-agent"
+            class="output-entry-agent"
           >
             {{ formatMessageAgent(q) }}
           </div>
           <div
-            class="message-inner"
+            class="output-entry-inner"
             :class="{ 'is-scrolling': q.scroll }"
             :style="{
               '--scroll-distance': `${q.scrollDistance}px`,
@@ -49,11 +49,11 @@
             }"
           >
             <div class="shiki-host is-message" v-html="q.html"></div>
-            <div v-if="q.attachments && q.attachments.length > 0" class="message-attachments">
+            <div v-if="q.attachments && q.attachments.length > 0" class="output-entry-attachments">
               <img
                 v-for="item in q.attachments"
                 :key="item.id"
-                class="message-attachment"
+                class="output-entry-attachment"
                 :src="item.url"
                 :alt="item.filename"
                 loading="lazy"
@@ -62,7 +62,7 @@
           </div>
           <div
             v-if="formatMessageMeta(q)"
-            class="message-meta"
+            class="output-entry-meta"
           >
             {{ formatMessageMeta(q) }}
           </div>
@@ -136,7 +136,7 @@ const emit = defineEmits<{
   (event: 'revert-message', payload: { sessionId: string; messageId: string }): void;
 }>();
 
-const dockEl = ref<HTMLDivElement | null>(null);
+const panelEl = ref<HTMLDivElement | null>(null);
 const thinkingFrames = ['', '.', '..', '...'];
 const thinkingIndex = ref(0);
 const thinkingSuffix = ref('');
@@ -217,11 +217,11 @@ onBeforeUnmount(() => {
   if (thinkingTimer !== undefined) window.clearInterval(thinkingTimer);
 });
 
-defineExpose({ dockEl });
+defineExpose({ panelEl });
 </script>
 
 <style scoped>
-.dock {
+.output-panel-root {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -230,7 +230,7 @@ defineExpose({ dockEl });
   min-height: 0;
 }
 
-.message-dock {
+.output-panel-shell {
   flex: 1;
   min-height: 0;
   overflow: hidden;
@@ -246,7 +246,7 @@ defineExpose({ dockEl });
   font-size: 13px;
 }
 
-.message-scroll {
+.output-panel-scroll {
   display: flex;
   flex-direction: column;
   gap: 8px;
@@ -258,7 +258,7 @@ defineExpose({ dockEl });
   scrollbar-gutter: stable;
 }
 
-.message-entry {
+.output-entry {
   position: relative;
   background: rgba(2, 6, 23, 0.6);
   border: 1px solid #1e293b;
@@ -269,29 +269,29 @@ defineExpose({ dockEl });
   box-sizing: border-box;
 }
 
-.message-entry.is-user {
+.output-entry.is-user {
   background: rgba(15, 23, 42, 0.72);
   border-color: rgba(148, 163, 184, 0.55);
   padding-top: 18px;
   padding-bottom: 18px;
 }
 
-.message-entry.is-user-build {
+.output-entry.is-user-build {
   background: rgba(37, 99, 235, 0.18);
   border-color: rgba(59, 130, 246, 0.6);
 }
 
-.message-entry.is-user-plan {
+.output-entry.is-user-plan {
   background: rgba(124, 58, 237, 0.2);
   border-color: rgba(168, 85, 247, 0.62);
 }
 
-.message-entry.is-user-neutral {
+.output-entry.is-user-neutral {
   background: rgba(15, 23, 42, 0.72);
   border-color: rgba(148, 163, 184, 0.55);
 }
 
-.message-inner {
+.output-entry-inner {
   margin: 0;
   white-space: pre-wrap;
   word-break: break-word;
@@ -299,7 +299,7 @@ defineExpose({ dockEl });
   line-height: var(--message-line-height);
 }
 
-.message-agent {
+.output-entry-agent {
   position: absolute;
   top: 6px;
   left: 6px;
@@ -307,7 +307,7 @@ defineExpose({ dockEl });
   color: rgba(191, 219, 254, 0.9);
 }
 
-.message-actions {
+.output-entry-actions {
   position: absolute;
   top: 6px;
   right: 8px;
@@ -316,7 +316,7 @@ defineExpose({ dockEl });
   gap: 6px;
 }
 
-.message-action {
+.output-entry-action {
   border: 1px solid rgba(148, 163, 184, 0.65);
   border-radius: 6px;
   background: rgba(15, 23, 42, 0.75);
@@ -327,21 +327,21 @@ defineExpose({ dockEl });
   cursor: pointer;
 }
 
-.message-action:hover {
+.output-entry-action:hover {
   background: rgba(30, 41, 59, 0.92);
 }
 
-.message-action-danger {
+.output-entry-action-danger {
   border-color: rgba(248, 113, 113, 0.7);
   background: rgba(127, 29, 29, 0.35);
   color: #fecaca;
 }
 
-.message-action-danger:hover {
+.output-entry-action-danger:hover {
   background: rgba(153, 27, 27, 0.5);
 }
 
-.message-meta {
+.output-entry-meta {
   position: absolute;
   bottom: 6px;
   right: 10px;
@@ -349,46 +349,46 @@ defineExpose({ dockEl });
   color: rgba(191, 219, 254, 0.9);
 }
 
-.message-dock .shiki-host {
+.output-panel-shell .shiki-host {
   color: inherit;
   line-height: var(--message-line-height);
 }
 
-.message-dock .shiki-host :deep(pre) {
+.output-panel-shell .shiki-host :deep(pre) {
   color: inherit;
   white-space: normal;
 }
 
-.message-dock .shiki-host :deep(code) {
+.output-panel-shell .shiki-host :deep(code) {
   color: inherit;
   white-space: normal;
   line-height: 0 !important;
 }
 
-.message-dock .shiki-host :deep(pre.shiki) {
+.output-panel-shell .shiki-host :deep(pre.shiki) {
   line-height: 0 !important;
 }
 
-.message-dock .shiki-host :deep(.line),
-.message-dock .shiki-host :deep(.line)::before {
+.output-panel-shell .shiki-host :deep(.line),
+.output-panel-shell .shiki-host :deep(.line)::before {
   line-height: var(--message-line-height) !important;
   color: inherit;
 }
 
-.message-dock .shiki-host :deep(.line) {
+.output-panel-shell .shiki-host :deep(.line) {
   white-space: pre-wrap;
   word-break: break-word;
 }
 
 
-.message-attachments {
+.output-entry-attachments {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
   gap: 6px;
   margin-top: 6px;
 }
 
-.message-attachment {
+.output-entry-attachment {
   width: 100%;
   max-height: 180px;
   border-radius: 8px;
@@ -397,15 +397,15 @@ defineExpose({ dockEl });
   background: #0b1320;
 }
 
-.message-dock .shiki-host :deep(.line:empty)::after {
+.output-panel-shell .shiki-host :deep(.line:empty)::after {
   content: ' ';
 }
 
-.message-inner.is-scrolling {
+.output-entry-inner.is-scrolling {
   animation: scroll-down var(--scroll-duration) linear forwards;
 }
 
-.message-dock .message-inner.is-scrolling {
+.output-panel-shell .output-entry-inner.is-scrolling {
   animation: none;
 }
 

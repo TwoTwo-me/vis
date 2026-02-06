@@ -1,10 +1,10 @@
 <template>
-  <div class="control-panel">
-    <div class="control-message">
+  <div class="input-panel">
+    <div class="input-message">
       <textarea
         ref="textareaRef"
         v-model="messageValue"
-        class="control-input control-textarea"
+        class="input-control input-textarea"
         :class="textareaToneClass"
         placeholder="Send a message..."
         @keydown="handleKeydown"
@@ -56,13 +56,13 @@
         </div>
       </div>
     </div>
-    <div class="control-toolbar">
-      <div class="control-selects">
-        <div class="control-field compact">
+    <div class="input-toolbar">
+      <div class="input-selects">
+        <div class="input-field compact">
           <select
             id="mode-select"
             v-model="modeValue"
-            class="control-input"
+            class="input-control"
             :disabled="!hasAgentOptions"
             aria-label="Agent"
             title="Agent (Tab)"
@@ -73,12 +73,12 @@
             </option>
           </select>
         </div>
-        <div class="control-field compact">
+        <div class="input-field compact">
           <select
             ref="modelSelectRef"
             id="model-select"
             v-model="modelValue"
-            class="control-input"
+            class="input-control"
             :disabled="!hasModelOptions"
             aria-label="Model"
             title="Model (Ctrl-M)"
@@ -95,11 +95,11 @@
             </optgroup>
           </select>
         </div>
-        <div class="control-field compact">
+        <div class="input-field compact">
           <select
             id="thinking-select"
             v-model="thinkingValue"
-            class="control-input"
+            class="input-control"
             :disabled="!hasThinkingOptions"
             aria-label="Variant"
             title="Variant (Ctrl-, / Ctrl-.)"
@@ -113,7 +113,7 @@
       </div>
       <button
         type="button"
-        class="control-button attach-button"
+        class="input-button attach-button"
         @click="triggerFileInput"
       >
         Attach
@@ -121,7 +121,7 @@
       <button
         v-if="isThinking"
         type="button"
-        class="control-button stop send-button"
+        class="input-button stop send-button"
         :disabled="!canAbort"
         @click="$emit('abort')"
       >
@@ -130,7 +130,7 @@
       <button
         v-else
         type="button"
-        class="control-button primary send-button"
+        class="input-button primary send-button"
         :disabled="!canSend"
         @click="$emit('send')"
       >
@@ -443,7 +443,7 @@ const textareaToneClass = computed(() => {
 </script>
 
 <style scoped>
-.control-panel {
+.input-panel {
   display: flex;
   flex-direction: column;
   gap: 10px;
@@ -460,21 +460,21 @@ const textareaToneClass = computed(() => {
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
 }
 
-.control-message {
+.input-message {
   width: 100%;
   position: relative;
   flex: 1 1 auto;
   min-height: 0;
 }
 
-.control-toolbar {
+.input-toolbar {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
 }
 
-.control-selects {
+.input-selects {
   display: flex;
   flex: 1 1 auto;
   min-width: 0;
@@ -483,23 +483,23 @@ const textareaToneClass = computed(() => {
   align-items: center;
 }
 
-.control-selects .control-input {
+.input-selects .input-control {
   height: 32px;
 }
 
-.control-field {
+.input-field {
   flex: 1 1 0;
   min-width: 0;
   display: flex;
   flex-direction: column;
 }
 
-.control-field.compact {
+.input-field.compact {
   flex: 1 1 160px;
   min-width: 160px;
 }
 
-.control-input {
+.input-control {
   width: 100%;
   background: #0b1320;
   color: #e2e8f0;
@@ -512,11 +512,11 @@ const textareaToneClass = computed(() => {
   box-sizing: border-box;
 }
 
-.control-input:focus-visible {
+.input-control:focus-visible {
   outline: none;
 }
 
-.control-textarea {
+.input-textarea {
   resize: none;
   min-height: 96px;
   font-size: 13px;
@@ -526,15 +526,15 @@ const textareaToneClass = computed(() => {
   min-height: 0;
 }
 
-.control-textarea.tone-build {
+.input-textarea.tone-build {
   border-color: rgba(59, 130, 246, 0.65);
 }
 
-.control-textarea.tone-plan {
+.input-textarea.tone-plan {
   border-color: rgba(168, 85, 247, 0.72);
 }
 
-.control-textarea.tone-neutral {
+.input-textarea.tone-neutral {
   border-color: #334155;
 }
 
@@ -638,7 +638,7 @@ const textareaToneClass = computed(() => {
   color: #94a3b8;
 }
 
-.control-button {
+.input-button {
   background: #1e293b;
   color: #e2e8f0;
   border: 1px solid #334155;
@@ -653,12 +653,12 @@ const textareaToneClass = computed(() => {
   height: 32px;
 }
 
-.control-button.primary {
+.input-button.primary {
   background: #2563eb;
   border-color: #1d4ed8;
 }
 
-.control-button.stop {
+.input-button.stop {
   background: #dc2626;
   border-color: #b91c1c;
   color: #fef2f2;
