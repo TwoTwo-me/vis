@@ -1005,36 +1005,54 @@ function isDarkThemeName(name: string) {
 }
 
 function getEntryTitle(entry: FileReadEntry) {
+  const prefix = getEntryPrefix(entry);
+  const withPrefix = (title: string) => `[${prefix}] ${title}`;
   if (entry.isPermission) {
     const permission = entry.permissionRequest?.permission;
-    return permission ? `Permission: ${permission}` : 'Permission request';
+    return permission ? withPrefix(`Permission: ${permission}`) : withPrefix('Permission request');
   }
-  if (entry.isShell) return entry.shellTitle ?? 'Shell';
+  if (entry.isShell) return withPrefix(entry.shellTitle ?? 'Shell');
   if (entry.isReasoning) {
     const sessionTitle = getSessionTitle(entry.sessionId);
     const reasoningTitle = entry.sessionId
       ? reasoningTitleBySessionId.get(entry.sessionId)
       : undefined;
-    return reasoningTitle ?? sessionTitle ?? 'Reasoning';
+    return withPrefix(reasoningTitle ?? sessionTitle ?? 'Reasoning');
   }
   if (entry.isSubagentMessage) {
     const sessionTitle = getSessionTitle(entry.sessionId);
-    if (sessionTitle) return sessionTitle;
+    if (sessionTitle) return withPrefix(sessionTitle);
   }
   const displayPath = resolveWorktreeRelativePath(entry.path);
   if (
     displayPath &&
     (entry.toolName === 'read' || entry.toolName === 'grep' || entry.toolName === 'apply_patch')
   )
-    return displayPath;
-  if (entry.toolTitle) return entry.toolTitle;
-  if (entry.toolName) return entry.toolName;
-  if (displayPath) return displayPath;
+    return withPrefix(displayPath);
+  if (entry.toolTitle) return withPrefix(entry.toolTitle);
+  if (entry.toolName) return withPrefix(entry.toolName);
+  if (displayPath) return withPrefix(displayPath);
   if (entry.header) {
     const cleaned = entry.header.trim().replace(/^#\s*/, '').trim();
-    if (cleaned) return cleaned;
+    if (cleaned) return withPrefix(cleaned);
   }
-  return 'tool';
+  return withPrefix('tool');
+}
+
+function getEntryPrefix(entry: FileReadEntry) {
+  if (entry.isPermission) return 'PERMISSION';
+  if (entry.isShell) return 'SHELL';
+  if (entry.isTaskList) return 'TASK';
+  if (entry.isReasoning) return 'MESSAGE';
+  if (entry.isSubagentMessage || entry.isMessage) return 'MESSAGE';
+  if (entry.toolName === 'apply_patch') return 'PATCH';
+  if (entry.toolName === 'write' || entry.isWrite) return 'WRITE';
+  if (entry.toolName === 'read') return 'READ';
+  if (entry.toolName === 'grep') return 'GREP';
+  if (entry.toolName === 'glob') return 'GLOB';
+  if (entry.toolName === 'bash') return 'SHELL';
+  if (entry.toolName) return entry.toolName.toUpperCase();
+  return 'MESSAGE';
 }
 
 function getSubagentExpiry(sessionId?: string) {
@@ -3028,6 +3046,18 @@ function extractFileBodyFromReadOutput(output: string) {
   return contentLines.join('\n');
 }
 
+function extractBodyFromGrepOutput(output: string) {
+  const lines = output.split('\n');
+  const contentLines: string[] = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*Line\s+\d+:\s?(.*)$/);
+    if (!match) continue;
+    contentLines.push(match[1] ?? '');
+  }
+  if (contentLines.length > 0) return contentLines.join('\n');
+  return output;
+}
+
 function escapeHtml(value: string) {
   return value
     .replace(/&/g, '&amp;')
@@ -3872,6 +3902,16 @@ function extractFileRead(payload: unknown, eventType: string) {
             toolName: tool,
           };
         }
+      }
+      if (tool === 'grep' && typeof outputValue === 'string') {
+        return {
+          content: extractBodyFromGrepOutput(outputValue),
+          path,
+          isWrite: false,
+          callId,
+          toolStatus: status,
+          toolName: tool,
+        };
       }
       blocks.push('output:');
       blocks.push(outputValue);
@@ -5656,12 +5696,12 @@ onBeforeUnmount(() => {
   font-size: 13px;
   --term-line-height: 1.2;
   --message-line-height: 1.2;
-  --term-border-color: #ccc;
+  --term-border-color: #1f2937;
   width: var(--term-width);
   height: var(--term-height);
-  background: black;
-  color: white;
-  border: 1px solid #ccc;
+  background: #050505;
+  color: #f3f4f6;
+  border: 1px solid #1f2937;
   overflow: hidden;
   font-family:
     ui-monospace, SFMono-Regular, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
@@ -5674,39 +5714,39 @@ onBeforeUnmount(() => {
 }
 
 .term.is-message {
-  background: #101824;
-  border-color: #64748b;
-  --term-border-color: #64748b;
-}
-
-.term.is-message.agent-tone-plan {
-  background: #1a0b1a;
-  border-color: #a855f7;
-  --term-border-color: #a855f7;
+  background: #050505;
+  border-color: #1f2937;
+  --term-border-color: #1f2937;
 }
 
 .term.is-message .term-titlebar {
-  background: rgba(100, 116, 139, 0.22);
+  background: rgba(2, 6, 23, 0.95);
   color: #cbd5e1;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.38);
-}
-
-.term.is-message.agent-tone-plan .term-titlebar {
-  background: rgba(168, 85, 247, 0.18);
-  color: #d8b4fe;
-  border-bottom: 1px solid rgba(168, 85, 247, 0.35);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
 }
 
 .term.is-message.agent-tone-build {
-  background: #0b1a2a;
-  border-color: #3b82f6;
-  --term-border-color: #3b82f6;
+  background: #050505;
+  border-color: #1f2937;
+  --term-border-color: #1f2937;
 }
 
 .term.is-message.agent-tone-build .term-titlebar {
-  background: rgba(59, 130, 246, 0.18);
-  color: #93c5fd;
-  border-bottom: 1px solid rgba(59, 130, 246, 0.35);
+  background: rgba(2, 6, 23, 0.95);
+  color: #cbd5e1;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+}
+
+.term.is-message.agent-tone-plan {
+  background: #050505;
+  border-color: #1f2937;
+  --term-border-color: #1f2937;
+}
+
+.term.is-message.agent-tone-plan .term-titlebar {
+  background: rgba(2, 6, 23, 0.95);
+  color: #cbd5e1;
+  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
 }
 
 .term.is-shell {
@@ -5716,30 +5756,36 @@ onBeforeUnmount(() => {
 }
 
 .term.is-permission {
-  background: #0b1320;
-  border-color: #334155;
-  --term-border-color: #334155;
+  background: #1f1303;
+  border-color: #f59e0b;
+  --term-border-color: #f59e0b;
 }
 
 .term.is-apply-patch,
 .term.is-write {
-  background: #0b1a2a;
-  border-color: #3b82f6;
-  --term-border-color: #3b82f6;
+  background: #190a24;
+  border-color: #a855f7;
+  --term-border-color: #a855f7;
 }
 
 .term.is-apply-patch .term-titlebar,
 .term.is-write .term-titlebar {
-  background: rgba(59, 130, 246, 0.18);
-  color: #93c5fd;
-  border-bottom: 1px solid rgba(59, 130, 246, 0.35);
+  background: rgba(168, 85, 247, 0.18);
+  color: #e9d5ff;
+  border-bottom: 1px solid rgba(168, 85, 247, 0.35);
 }
 
 .term.is-tasklist {
-  background: #0b1120;
-  border-color: #334155;
-  --term-border-color: #334155;
+  background: #050505;
+  border-color: #1f2937;
+  --term-border-color: #1f2937;
   color: #e2e8f0;
+}
+
+.term.is-permission .term-titlebar {
+  background: rgba(245, 158, 11, 0.18);
+  color: #fcd34d;
+  border-bottom: 1px solid rgba(245, 158, 11, 0.35);
 }
 
 .term-titlebar {
@@ -5748,9 +5794,9 @@ onBeforeUnmount(() => {
   align-items: center;
   padding: 0 10px;
   font-size: 12px;
-  color: #cbd5f5;
-  background: rgba(30, 41, 59, 0.92);
-  border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+  color: #cbd5e1;
+  background: rgba(2, 6, 23, 0.95);
+  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
   cursor: grab;
   user-select: none;
   white-space: nowrap;
