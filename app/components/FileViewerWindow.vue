@@ -237,6 +237,28 @@ function onClose() {
   color: #64748b;
 }
 
+.viewer-content :deep(.line.line-added) {
+  background: rgba(46, 160, 67, 0.22);
+  box-shadow: inset 3px 0 0 #2ea043;
+  color: #aff5b4;
+}
+
+.viewer-content :deep(.line.line-removed) {
+  background: rgba(248, 81, 73, 0.2);
+  box-shadow: inset 3px 0 0 #f85149;
+  color: #ffdcd7;
+}
+
+.viewer-content :deep(.line.line-hunk) {
+  background: rgba(56, 139, 253, 0.18);
+  color: #c9d1d9;
+}
+
+.viewer-content :deep(.line.line-header) {
+  background: rgba(110, 118, 129, 0.18);
+  color: #c9d1d9;
+}
+
 .viewer-resizer {
   position: absolute;
   right: 0;

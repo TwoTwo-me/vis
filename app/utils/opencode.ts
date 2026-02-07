@@ -81,11 +81,15 @@ export function readFileContent(
   }) as Promise<unknown>;
 }
 
-export function listFileStatus(baseUrl: string, payload: { directory: string }) {
-  return getJson(baseUrl, '/file/status', {
+export function getSessionDiff(
+  baseUrl: string,
+  payload: { sessionID: string; directory?: string },
+) {
+  return getJson(baseUrl, `/session/${payload.sessionID}/diff`, {
     directory: payload.directory,
   }) as Promise<unknown>;
 }
+
 
 export function listProjects(baseUrl: string, directory?: string) {
   return getJson(baseUrl, '/project', { directory }) as Promise<unknown>;

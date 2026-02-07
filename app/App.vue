@@ -49,11 +49,12 @@
               :selected-tree-path="selectedTreePath"
               :tree-loading="treeLoading"
               :tree-error="treeError"
-              :tree-status-by-path="treeStatusByPath"
+              :tree-status-by-path="sessionStatusByPath"
               @toggle-collapse="toggleSidePanelCollapsed"
               @change-tab="setSidePanelTab"
               @toggle-dir="toggleTreeDirectory"
               @select-file="selectTreeFile"
+              @open-diff="openSessionDiff"
               @open-file="openFileViewer"
             />
           </div>
@@ -178,7 +179,6 @@ const FILE_VIEWER_WINDOW_WIDTH = 840;
 const FILE_VIEWER_WINDOW_HEIGHT = 520;
 const FILE_VIEWER_WINDOW_MIN_WIDTH = 460;
 const FILE_VIEWER_WINDOW_MIN_HEIGHT = 260;
-const TREE_REFRESH_DEBOUNCE_MS = 400;
 const TERM_COLUMNS = 80;
 const TERM_ROWS = 25;
 const TERM_FONT_SIZE_PX = 13;
@@ -300,25 +300,31 @@ type TreeNode = {
   type: 'directory' | 'file';
   children?: TreeNode[];
   loaded?: boolean;
+  ignored?: boolean;
+  synthetic?: boolean;
 };
 
 type FileNode = {
   name?: string;
   path: string;
   type?: string;
+  ignored?: boolean;
 };
 
-type FileStatus = {
-  path?: string;
-  status?: 'added' | 'modified' | 'deleted';
-  added?: number;
-  removed?: number;
-};
 
 type FileContentResponse = {
   content?: string;
   encoding?: string;
   type?: 'text' | 'binary';
+};
+
+type SessionDiffEntry = {
+  file?: string;
+  before?: string;
+  after?: string;
+  additions?: number;
+  deletions?: number;
+  status?: 'added' | 'modified' | 'deleted';
 };
 
 type PermissionRequest = {
@@ -508,10 +514,10 @@ const expandedTreePathSet = ref(new Set<string>());
 const selectedTreePath = ref('');
 const treeLoading = ref(false);
 const treeError = ref('');
-const treeStatusByPath = ref<Record<string, 'added' | 'modified' | 'deleted'>>({});
-let treeRefreshTimer: number | null = null;
+const sessionStatusByPath = ref<Record<string, 'added' | 'modified' | 'deleted'>>({});
+const sessionDiffEntries = ref<SessionDiffEntry[]>([]);
+const sessionDiffByPath = ref<Record<string, SessionDiffEntry>>({});
 let treeRequestId = 0;
-let treeStatusRequestId = 0;
 const fileViewerQueue = ref<FileReadEntry[]>([]);
 
 type ProjectInfo = {
@@ -2460,7 +2466,7 @@ async function bootstrapSelections() {
     isBootstrapping.value = false;
     if (activeDirectory.value) {
       void loadTreePath('.');
-      void refreshTreeStatus();
+      void refreshSessionDiff();
     }
   }
 }
@@ -3938,6 +3944,7 @@ function reloadSelectedSessionState() {
     void fetchHistory(selectedSessionId.value);
     void restoreShellSessions(selectedSessionId.value);
     void reloadTodosForAllowedSessions();
+    void refreshSessionDiff();
     const directory = activeDirectory.value || undefined;
     void fetchPendingPermissions(directory);
     void fetchPendingQuestions(directory);
@@ -4011,14 +4018,14 @@ watch(activeDirectory, (directory) => {
     treeNodes.value = [];
     expandedTreePathSet.value = new Set();
     selectedTreePath.value = '';
-    treeStatusByPath.value = {};
+    updateSessionDiffState([]);
     return;
   }
   if (selectedWorktreeDir.value && activePath !== selectedWorktreeDir.value) return;
   void fetchCommands(activePath);
   void reloadTodosForAllowedSessions();
   void loadTreePath('.');
-  void refreshTreeStatus();
+  void refreshSessionDiff();
 });
 
 watch(sidePanelCollapsed, () => {
@@ -4747,7 +4754,8 @@ function normalizeFileNode(item: unknown, directory: string): FileNode | null {
     path;
   const rawType = typeof record.type === 'string' ? record.type.toLowerCase() : '';
   const type = rawType.includes('dir') ? 'directory' : 'file';
-  return { path, name, type };
+  const ignored = Boolean(record.ignored);
+  return { path, name, type, ignored };
 }
 
 function sortTreeNodes(nodes: TreeNode[]) {
@@ -4782,6 +4790,7 @@ function buildTreeNodes(items: unknown[], directory: string, parentPath: string)
         existing.type = 'directory';
         existing.children = [];
       }
+      if (node.ignored) existing.ignored = true;
       return;
     }
     unique.set(path, {
@@ -4790,6 +4799,8 @@ function buildTreeNodes(items: unknown[], directory: string, parentPath: string)
       type: isLeaf ? node.type ?? 'file' : 'directory',
       children: isLeaf && node.type !== 'directory' ? undefined : [],
       loaded: false,
+      ignored: Boolean(node.ignored),
+      synthetic: false,
     });
   });
   return sortTreeNodes(Array.from(unique.values()));
@@ -4822,8 +4833,8 @@ function findTreeNodeByPath(nodes: TreeNode[], targetPath: string): TreeNode | n
   return null;
 }
 
-function aggregateTreeStatuses() {
-  const fileStatuses = treeStatusByPath.value;
+function aggregateSessionStatuses() {
+  const fileStatuses = sessionStatusByPath.value;
   const next: Record<string, 'added' | 'modified' | 'deleted'> = { ...fileStatuses };
   const priority = { added: 1, modified: 2, deleted: 3 } as const;
   Object.entries(fileStatuses).forEach(([path, status]) => {
@@ -4838,7 +4849,7 @@ function aggregateTreeStatuses() {
       }
     }
   });
-  treeStatusByPath.value = next;
+  sessionStatusByPath.value = next;
 }
 
 async function loadTreePath(path: string) {
@@ -4873,40 +4884,59 @@ async function loadTreePath(path: string) {
   }
 }
 
-async function refreshTreeStatus() {
-  const directory = activeDirectory.value.trim();
-  if (!directory) {
-    treeStatusByPath.value = {};
-    return;
-  }
-  const requestId = ++treeStatusRequestId;
-  try {
-    const data = (await opencodeApi.listFileStatus(OPENCODE_BASE_URL, {
-      directory,
-    })) as FileStatus[];
-    if (requestId !== treeStatusRequestId) return;
-    const map: Record<string, 'added' | 'modified' | 'deleted'> = {};
-    (Array.isArray(data) ? data : []).forEach((item) => {
-      if (!item || typeof item !== 'object') return;
-      if (!item.path || !item.status) return;
-      const relativePath = toRelativePath(item.path, directory);
-      if (relativePath === '.') return;
-      map[relativePath] = item.status;
-    });
-    treeStatusByPath.value = map;
-    aggregateTreeStatuses();
-  } catch {
-    if (requestId !== treeStatusRequestId) return;
-    treeStatusByPath.value = {};
-  }
+function normalizeSessionDiffEntries(entries: unknown[]) {
+  return entries
+    .map((entry) => {
+      if (!entry || typeof entry !== 'object') return null;
+      const record = entry as Record<string, unknown>;
+      const file = typeof record.file === 'string' ? record.file : undefined;
+      const status =
+        typeof record.status === 'string'
+          ? (record.status as 'added' | 'modified' | 'deleted')
+          : undefined;
+      const additions = typeof record.additions === 'number' ? record.additions : undefined;
+      const deletions = typeof record.deletions === 'number' ? record.deletions : undefined;
+      const before = typeof record.before === 'string' ? record.before : undefined;
+      const after = typeof record.after === 'string' ? record.after : undefined;
+      return { file, status, additions, deletions, before, after } as SessionDiffEntry;
+    })
+    .filter((entry): entry is SessionDiffEntry => Boolean(entry?.file));
 }
 
-function queueTreeStatusRefresh() {
-  if (treeRefreshTimer !== null) window.clearTimeout(treeRefreshTimer);
-  treeRefreshTimer = window.setTimeout(() => {
-    treeRefreshTimer = null;
-    void refreshTreeStatus();
-  }, TREE_REFRESH_DEBOUNCE_MS);
+function updateSessionDiffState(entries: SessionDiffEntry[]) {
+  sessionDiffEntries.value = entries;
+  const next: Record<string, 'added' | 'modified' | 'deleted'> = {};
+  const nextByPath: Record<string, SessionDiffEntry> = {};
+  const directory = activeDirectory.value.trim();
+  entries.forEach((entry) => {
+    if (!entry.file) return;
+    const relativePath = toRelativePath(entry.file, directory);
+    if (relativePath === '.') return;
+    if (entry.status) next[relativePath] = entry.status;
+    nextByPath[relativePath] = entry;
+  });
+  sessionStatusByPath.value = next;
+  sessionDiffByPath.value = nextByPath;
+  aggregateSessionStatuses();
+}
+
+async function refreshSessionDiff() {
+  const sessionId = selectedSessionId.value;
+  if (!sessionId) {
+    updateSessionDiffState([]);
+    return;
+  }
+  const directory = activeDirectory.value.trim();
+  try {
+    const data = await opencodeApi.getSessionDiff(OPENCODE_BASE_URL, {
+      sessionID: sessionId,
+      directory,
+    });
+    const entries = Array.isArray(data) ? normalizeSessionDiffEntries(data) : [];
+    updateSessionDiffState(entries);
+  } catch {
+    updateSessionDiffState([]);
+  }
 }
 
 function toggleTreeDirectory(path: string) {
@@ -4947,6 +4977,50 @@ function getFileViewerByPath(path: string) {
 function closeFileViewer(entry: FileReadEntry) {
   const index = fileViewerQueue.value.findIndex((item) => item.toolKey === entry.toolKey);
   if (index >= 0) fileViewerQueue.value.splice(index, 1);
+}
+
+function openSessionDiff(path: string) {
+  const entry = sessionDiffByPath.value[path];
+  if (!entry || !entry.file) return;
+  const existing = fileViewerQueue.value.find((item) => item.toolKey === `session-diff:${path}`);
+  if (existing) {
+    bringToFront(existing);
+    return;
+  }
+  const diffText = formatDiffEntries([entry]);
+  const gutterLines = buildDiffGutterLines(diffText);
+  const metrics = getCanvasMetrics();
+  const x = metrics ? clamp(metrics.canvasRect.width * 0.16, 16, Math.max(16, metrics.canvasRect.width - FILE_VIEWER_WINDOW_WIDTH - 16)) : 24;
+  const y = metrics ? clamp(metrics.toolAreaHeight * 0.1, 16, Math.max(16, metrics.toolAreaHeight - FILE_VIEWER_WINDOW_HEIGHT - 16)) : 24;
+  const diffEntry: FileReadEntry = {
+    time: Date.now(),
+    expiresAt: Number.MAX_SAFE_INTEGER,
+    x,
+    y,
+    header: '',
+    path,
+    content: diffText,
+    scroll: false,
+    scrollDistance: 0,
+    scrollDuration: 0,
+    html: buildEntryHtml(diffText, 'diff', {
+      toolGutterMode: 'grep-source',
+      toolGutterLines: gutterLines,
+    }),
+    isWrite: false,
+    isMessage: false,
+    toolName: 'diff',
+    toolTitle: `Session diff: ${path}`,
+    toolLang: 'diff',
+    toolGutterMode: 'grep-source',
+    toolGutterLines: gutterLines,
+    toolKey: `session-diff:${path}`,
+    width: FILE_VIEWER_WINDOW_WIDTH,
+    height: FILE_VIEWER_WINDOW_HEIGHT,
+    isBinary: false,
+  };
+  bringToFront(diffEntry);
+  fileViewerQueue.value.push(diffEntry);
 }
 
 async function openFileViewer(path: string) {
@@ -5389,6 +5463,51 @@ function formatDiffEntries(entries: unknown[]) {
   });
 
   return blocks.filter((block) => typeof block === 'string').join('\n\n');
+}
+
+function buildDiffGutterLines(source: string) {
+  const lines = source.split('\n');
+  let oldLine = 0;
+  let newLine = 0;
+  const padWidth = 4;
+  const padLeft = (value: number | '') => {
+    const text = value === '' ? '' : String(value);
+    return text.padStart(padWidth, ' ');
+  };
+  return lines.map((line) => {
+    if (line.startsWith('@@')) {
+      const match = /@@\s+-(\d+)(?:,\d+)?\s+\+(\d+)(?:,\d+)?\s+@@/.exec(line);
+      if (match) {
+        oldLine = Number(match[1]);
+        newLine = Number(match[2]);
+      }
+      return '';
+    }
+    if (
+      line.startsWith('diff ') ||
+      line.startsWith('index ') ||
+      line.startsWith('---') ||
+      line.startsWith('+++') ||
+      line.startsWith('***')
+    ) {
+      return '';
+    }
+    if (line.startsWith('+') && !line.startsWith('+++')) {
+      const gutter = `${padLeft('')} ${padLeft(newLine)}`;
+      newLine += 1;
+      return gutter;
+    }
+    if (line.startsWith('-') && !line.startsWith('---')) {
+      const gutter = `${padLeft(oldLine)} ${padLeft('')}`;
+      oldLine += 1;
+      return gutter;
+    }
+    if (oldLine === 0 && newLine === 0) return '';
+    const gutter = `${padLeft(oldLine)} ${padLeft(newLine)}`;
+    oldLine += 1;
+    newLine += 1;
+    return gutter;
+  });
 }
 
 function extractPatch(payload: unknown) {
@@ -7083,16 +7202,6 @@ function extractEventDirectory(payload: unknown) {
   return value?.trim() ?? '';
 }
 
-function shouldRefreshTreeStatus(eventType: string) {
-  const normalized = normalizeEventType(eventType);
-  return (
-    normalized === 'filewatcherupdated' ||
-    normalized === 'fileedited' ||
-    normalized === 'vcsbranchupdated' ||
-    normalized === 'projectupdated' ||
-    normalized === 'serverconnected'
-  );
-}
 
 const src = shallowRef<EventSource>();
 function connect() {
@@ -7227,6 +7336,24 @@ function connect() {
             attempt: sessionStatus.attempt || 1,
           };
         }
+      }
+    }
+
+    if (resolvedEventType && resolvedEventType.startsWith('session.diff')) {
+      const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : undefined;
+      const payloadObj =
+        record?.payload && typeof record.payload === 'object'
+          ? (record.payload as Record<string, unknown>)
+          : undefined;
+      const properties =
+        payloadObj?.properties && typeof payloadObj.properties === 'object'
+          ? (payloadObj.properties as Record<string, unknown>)
+          : undefined;
+      const diffEntries =
+        (properties?.diff as unknown[] | undefined) ?? (payloadObj?.diff as unknown[] | undefined);
+      if (Array.isArray(diffEntries)) {
+        const entries = normalizeSessionDiffEntries(diffEntries);
+        updateSessionDiffState(entries);
       }
     }
 
@@ -7505,6 +7632,7 @@ function connect() {
             messageModelId: nextMessageModelId,
             messageUsage: nextMessageUsage,
             messageVariant: nextMessageVariant,
+            message,
             messageTime: nextMessageTime,
             scroll: !isFloatingMessage && nextOverflowLines > 0,
             scrollDistance: isFloatingMessage ? 0 : nextScrollDistance,
@@ -7597,7 +7725,7 @@ onMounted(() => {
   fetchCommands(activeDirectory.value || undefined);
   if (activeDirectory.value) {
     void loadTreePath('.');
-    void refreshTreeStatus();
+    void refreshSessionDiff();
   }
   const directory = activeDirectory.value || undefined;
   fetchPendingPermissions(directory);
@@ -7634,12 +7762,27 @@ onMounted(() => {
   window.addEventListener('storage', handleComposerDraftStorage);
   unregisterTreeGlobalHook?.();
   unregisterTreeGlobalHook = registerGlobalEventHook((payload, eventType) => {
-    if (!shouldRefreshTreeStatus(eventType)) return;
+    const normalized = normalizeEventType(eventType);
+    if (normalized !== 'sessiondiff') return;
     const directory = activeDirectory.value.trim();
     if (!directory) return;
     const eventDirectory = extractEventDirectory(payload);
     if (eventDirectory && normalizeDirectory(eventDirectory) !== normalizeDirectory(directory)) return;
-    queueTreeStatusRefresh();
+    const record = payload && typeof payload === 'object' ? (payload as Record<string, unknown>) : undefined;
+    const payloadObj =
+      record?.payload && typeof record.payload === 'object'
+        ? (record.payload as Record<string, unknown>)
+        : undefined;
+    const properties =
+      payloadObj?.properties && typeof payloadObj.properties === 'object'
+        ? (payloadObj.properties as Record<string, unknown>)
+        : undefined;
+    const diffEntries =
+      (properties?.diff as unknown[] | undefined) ?? (payloadObj?.diff as unknown[] | undefined);
+    if (Array.isArray(diffEntries)) {
+      const entries = normalizeSessionDiffEntries(diffEntries);
+      updateSessionDiffState(entries);
+    }
   });
   connect();
 });
@@ -7652,10 +7795,6 @@ onBeforeUnmount(() => {
     cancelAnimationFrame(frame);
   });
   pendingToolScrollFrames.clear();
-  if (treeRefreshTimer !== null) {
-    window.clearTimeout(treeRefreshTimer);
-    treeRefreshTimer = null;
-  }
   unregisterTreeGlobalHook?.();
   unregisterTreeGlobalHook = null;
   src.value?.close();

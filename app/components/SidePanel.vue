@@ -33,6 +33,7 @@
         :status-by-path="treeStatusByPath"
         @toggle-dir="(path) => emit('toggle-dir', path)"
         @select-file="(path) => emit('select-file', path)"
+        @open-diff="(path) => emit('open-diff', path)"
         @open-file="(path) => emit('open-file', path)"
       />
     </div>
@@ -79,6 +80,7 @@ const emit = defineEmits<{
   (event: 'change-tab', value: 'todo' | 'tree'): void;
   (event: 'toggle-dir', path: string): void;
   (event: 'select-file', path: string): void;
+  (event: 'open-diff', path: string): void;
   (event: 'open-file', path: string): void;
 }>();
 
