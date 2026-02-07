@@ -130,7 +130,7 @@ const props = defineProps<{
   activeDirectory: string;
   activeDirectoryMeta?: Record<string, { branch?: string }>;
   sessions: SessionInfo[];
-  sessionStatusById?: Record<string, 'busy' | 'idle'>;
+  sessionStatusById?: Record<string, 'busy' | 'idle' | 'retry'>;
   selectedSessionId: string;
   homePath?: string;
 }>();
@@ -185,13 +185,17 @@ function sessionLabel(session: SessionInfo) {
 function sessionStatusIcon(sessionId: string) {
   const status = props.sessionStatusById?.[sessionId];
   if (status === 'busy') return '🤔';
-  return '🟢';
+  if (status === 'retry') return '🔴';
+  if (status === 'idle') return '🟢';
+  return '⚪';
 }
 
 function sessionStatusText(sessionId: string) {
   const status = props.sessionStatusById?.[sessionId];
   if (status === 'busy') return 'busy';
-  return 'idle';
+  if (status === 'retry') return 'retry';
+  if (status === 'idle') return 'idle';
+  return 'unknown';
 }
 
 function activeDirectoryLabel(directory: string) {

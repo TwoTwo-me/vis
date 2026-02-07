@@ -442,7 +442,7 @@ const runningToolIds = new Set<string>();
 const subagentSessionExpiry = new Map<string, number>();
 const messageSummaryTitleById = new Map<string, string>();
 const reasoningTitleBySessionId = new Map<string, string>();
-type SessionStatusType = 'busy' | 'idle';
+type SessionStatusType = 'busy' | 'idle' | 'retry';
 
 const sessionStatusById = new Map<string, SessionStatusType>();
 const sessionStatusVersion = ref(0);
@@ -1731,7 +1731,7 @@ function getSubagentExpiry(sessionId?: string) {
   const stored = subagentSessionExpiry.get(sessionId);
   if (stored !== undefined) return stored;
   const status = sessionStatusById.get(sessionId);
-  if (status === 'busy') return Number.MAX_SAFE_INTEGER;
+  if (status === 'busy' || status === 'retry') return Number.MAX_SAFE_INTEGER;
   if (status === 'idle') return now;
   return now + SUBAGENT_ACTIVE_TTL_MS;
 }
@@ -2644,13 +2644,18 @@ async function fetchSessionStatus(directory?: string) {
       if (type === 'busy' || type === 'idle') {
         nextEntries.push([sessionId, type]);
       } else if (type === 'retry') {
-        nextEntries.push([sessionId, 'busy']);
+        nextEntries.push([sessionId, 'retry']);
       }
     });
     replaceSessionStatuses(nextEntries);
     if (selectedSessionId.value) {
       const nextStatus = sessionStatusById.get(selectedSessionId.value);
-      selectedSessionStatus.value = nextStatus ?? '';
+      if (nextStatus === 'retry') {
+        selectedSessionStatus.value = 'busy';
+      } else {
+        retryStatus.value = null;
+        selectedSessionStatus.value = nextStatus ?? '';
+      }
     } else {
       selectedSessionStatus.value = '';
     }
@@ -6312,7 +6317,7 @@ function applySessionStatusEvent(payload: unknown, eventType: string) {
   if (sessionStatus.status !== 'retry') return;
 
   if (sessionId) {
-    setSessionStatus(sessionId, 'busy');
+    setSessionStatus(sessionId, 'retry');
   }
   if (!isSelectedSessionEvent || !sessionId) return;
 
