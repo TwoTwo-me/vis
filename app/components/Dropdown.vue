@@ -9,19 +9,23 @@
         :disabled="props.disabled"
         ref="trigger"
         @click.stop="toggle"
-        @keydown.esc.prevent="close"
+        @keydown="onKeyDown"
       >
-        <span class="ui-dropdown-label">{{ displayLabel }}</span>
+        <slot name="label">
+          <span class="ui-dropdown-label">{{ displayLabel }}</span>
+        </slot>
         <span class="ui-dropdown-icon">{{ props.menuIcon ?? 'v' }}</span>
       </button>
     </slot>
     <div
       v-if="isActive"
+      ref="menu"
       class="ui-dropdown-menu"
       :class="props.popupClass"
       :style="[props.popupStyle, menuStyle]"
       role="listbox"
       @click.stop
+      @keydown="onKeyDown"
     >
       <slot :close="close" />
     </div>
@@ -29,7 +33,7 @@
 </template>
 
 <script lang="ts" setup generic="T">
-import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, type StyleValue } from 'vue';
+import { computed, nextTick, onBeforeUnmount, onMounted, provide, reactive, ref, watch, type StyleValue } from 'vue';
 
 export interface DropdownAPI {
   select: (item: unknown) => void;
@@ -58,6 +62,7 @@ const emit = defineEmits<{
 
 const root = ref<HTMLElement | null>(null);
 const trigger = ref<HTMLElement | null>(null);
+const menu = ref<HTMLElement | null>(null);
 const isActive = ref(false);
 const menuStyle = ref<StyleValue>();
 
@@ -77,21 +82,139 @@ function close() {
   isActive.value = false;
 }
 
+watch(isActive, (active) => {
+  if (!active) clearHighlight();
+});
+
+function getCandidateItems(): HTMLElement[] {
+  if (!menu.value) return [];
+  return Array.from(menu.value.querySelectorAll('.ui-input-candidate-item:not([aria-disabled="true"])'));
+}
+
+function clearHighlight() {
+  if (!menu.value) return;
+  menu.value.querySelectorAll('.ui-input-candidate-item[aria-selected="true"]').forEach((el) => {
+    el.setAttribute('aria-selected', 'false');
+  });
+}
+
+function highlightItem(el: HTMLElement | undefined) {
+  clearHighlight();
+  if (!el) return;
+  el.setAttribute('aria-selected', 'true');
+  el.scrollIntoView({ block: 'nearest' });
+}
+
+function moveHighlight(direction: 'up' | 'down') {
+  const items = getCandidateItems();
+  if (items.length === 0) return;
+  const currentIndex = items.findIndex((el) => el.getAttribute('aria-selected') === 'true');
+  let nextIndex: number;
+  if (direction === 'down') {
+    nextIndex = currentIndex >= 0 ? (currentIndex + 1) % items.length : 0;
+  } else {
+    nextIndex = currentIndex >= 0 ? (currentIndex - 1 + items.length) % items.length : items.length - 1;
+  }
+  highlightItem(items[nextIndex]);
+}
+
+function selectHighlighted() {
+  const items = getCandidateItems();
+  const current = items.find((el) => el.getAttribute('aria-selected') === 'true');
+  if (current) {
+    current.click();
+    return true;
+  }
+  return false;
+}
+
+function onKeyDown(e: KeyboardEvent) {
+  if (e.key === 'Escape') {
+    if (isActive.value) {
+      e.preventDefault();
+      e.stopPropagation();
+      close();
+    }
+    return;
+  }
+
+  if (!isActive.value) {
+    if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter' || e.key === ' ') {
+      e.preventDefault();
+      toggle();
+    }
+    return;
+  }
+
+  if (e.key === 'ArrowDown') {
+    e.preventDefault();
+    e.stopPropagation();
+    moveHighlight('down');
+    return;
+  }
+  if (e.key === 'ArrowUp') {
+    e.preventDefault();
+    e.stopPropagation();
+    moveHighlight('up');
+    return;
+  }
+  if (e.key === 'Enter') {
+    e.preventDefault();
+    e.stopPropagation();
+    selectHighlighted();
+    return;
+  }
+  if (e.key === 'Tab') {
+    e.preventDefault();
+    e.stopPropagation();
+    moveHighlight('down');
+    return;
+  }
+}
+
 function updateMenuPosition() {
+  if (!isActive.value) return;
   const triggerEl = trigger.value;
-  if (!triggerEl) return;
+  const menuEl = menu.value;
+  if (!triggerEl || !menuEl) return;
+
+  const gap = 6;
+  const margin = 8;
+  const viewportWidth = window.innerWidth;
+  const viewportHeight = window.innerHeight;
   const rect = triggerEl.getBoundingClientRect();
+
+  const width = Math.min(rect.width, Math.max(1, viewportWidth - margin * 2));
+  const left = Math.min(Math.max(rect.left, margin), viewportWidth - width - margin);
+
+  const naturalHeight = menuEl.scrollHeight;
+  const spaceBelow = viewportHeight - rect.bottom - gap - margin;
+  const spaceAbove = rect.top - gap - margin;
+  const preferUpward = spaceBelow < Math.min(180, naturalHeight) && spaceAbove > spaceBelow;
+  const availableHeight = preferUpward ? spaceAbove : spaceBelow;
+  const maxHeight = Math.max(80, Math.min(280, availableHeight));
+  const renderedHeight = Math.min(naturalHeight, maxHeight);
+
+  let top = preferUpward ? rect.top - gap - renderedHeight : rect.bottom + gap;
+  if (top < margin) top = margin;
+  if (top + renderedHeight > viewportHeight - margin) {
+    top = Math.max(margin, viewportHeight - margin - renderedHeight);
+  }
+
   menuStyle.value = {
     position: 'fixed',
-    top: `${rect.bottom + 6}px`,
-    left: `${rect.left}px`,
-    width: `${rect.width}px`,
+    top: `${Math.round(top)}px`,
+    left: `${Math.round(left)}px`,
+    width: `${Math.round(width)}px`,
+    maxHeight: `${Math.round(maxHeight)}px`,
   };
 }
 
 function handlePointerDown(event: PointerEvent) {
   if (!root.value) return;
   if (root.value.contains(event.target as Node)) return;
+  const menuEl = menu.value;
+  if (menuEl && menuEl.contains(event.target as Node)) return;
   close();
 }
 
@@ -115,7 +238,10 @@ const api = reactive({
   },
   close,
   selected: computed(() => props.modelValue),
-  update: async () => undefined,
+  async update() {
+    await nextTick();
+    updateMenuPosition();
+  },
 });
 
 provide('x-selectable', api);
@@ -162,6 +288,7 @@ provide('x-selectable', api);
 .ui-dropdown-icon {
   font-size: 12px;
   opacity: 0.7;
+  flex: 0 0 auto;
 }
 
 .ui-dropdown-menu {

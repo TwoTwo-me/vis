@@ -195,8 +195,12 @@ export function listPendingQuestions(baseUrl: string, directory?: string) {
   return getJson(baseUrl, '/question', { directory }) as Promise<unknown>;
 }
 
-export function listSessionMessages(baseUrl: string, sessionId: string, directory?: string) {
-  return getJson(baseUrl, `/session/${sessionId}/message`, { directory }) as Promise<unknown>;
+export function listSessionMessages(baseUrl: string, sessionId: string, options: { directory?: string; limit?: number } = {}) {
+  return getJson(baseUrl, `/session/${sessionId}/message`, { directory: options.directory, limit: options.limit }) as Promise<unknown>;
+}
+
+export function getSessionMessage(baseUrl: string, sessionId: string, messageId: string, directory?: string) {
+  return getJson(baseUrl, `/session/${sessionId}/message/${messageId}`, { directory }) as Promise<unknown>;
 }
 
 export function getSessionTodos(baseUrl: string, sessionId: string, directory?: string) {

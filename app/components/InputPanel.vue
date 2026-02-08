@@ -55,64 +55,107 @@
         </div>
       </div>
     </div>
-    <div class="input-toolbar">
-      <div class="input-selects">
-        <div class="input-field compact">
-          <select
-            id="mode-select"
-            v-model="modeValue"
-            class="input-control"
-            :disabled="!hasAgentOptions"
-            aria-label="Agent"
-            title="Agent (Tab)"
-          >
-            <option v-if="!hasAgentOptions" value="">Loading agents...</option>
-            <option v-for="agent in agentOptions" :key="agent.id" :value="agent.id">
-              {{ agent.label }}
-            </option>
-          </select>
-        </div>
-        <div class="input-field compact">
-          <select
-            ref="modelSelectRef"
-            id="model-select"
-            v-model="modelValue"
-            class="input-control"
-            :disabled="!hasModelOptions"
-            aria-label="Model"
-            title="Model (Ctrl-M)"
-          >
-            <option v-if="!hasModelOptions" value="">Loading models...</option>
-            <optgroup
-              v-for="group in groupedModelOptions"
-              :key="group.providerID"
-              :label="group.label"
+      <div class="input-toolbar">
+        <div class="input-selects">
+          <div class="input-field compact">
+            <Dropdown
+              v-model="modeValue"
+              :label="selectedAgentLabel"
+              :placeholder="hasAgentOptions ? 'Select agent' : 'Loading agents...'"
+              :disabled="!hasAgentOptions"
+              button-class="input-control input-dropdown-button"
+              :button-style="agentButtonStyle"
+              popup-class="input-dropdown-popup"
+              auto-close
+              title="Agent (Tab)"
             >
-              <option v-for="model in group.models" :key="model.id" :value="model.id">
-                {{ model.label }}
-              </option>
-            </optgroup>
-          </select>
+              <template #label>
+                <span class="ui-dropdown-label" :style="agentButtonLabelStyle">{{ selectedAgentLabel }}</span>
+              </template>
+              <template #default>
+                <div class="dropdown-list">
+                  <div v-if="!hasAgentOptions" class="dropdown-empty">Loading agents...</div>
+                  <DropdownItem v-for="agent in agentOptions" :key="agent.id" :value="agent.id">
+                    <div class="agent-dropdown-item">
+                      <span class="agent-dropdown-name" :style="agentOptionNameStyle(agent)">
+                        {{ agent.label }}
+                      </span>
+                      <span v-if="agent.description" class="agent-dropdown-description">
+                        {{ agent.description }}
+                      </span>
+                    </div>
+                  </DropdownItem>
+                </div>
+              </template>
+            </Dropdown>
+          </div>
+          <div class="input-field compact">
+            <div ref="modelDropdownRef" class="input-dropdown-root">
+              <Dropdown
+                v-model="modelValue"
+                :label="selectedModelDisplayName"
+                :placeholder="hasModelOptions ? 'Select model' : 'Loading models...'"
+                :disabled="!hasModelOptions"
+                button-class="input-control input-dropdown-button"
+                :button-style="agentButtonStyle"
+                popup-class="input-dropdown-popup"
+                auto-close
+                title="Model (Ctrl-M)"
+              >
+                <template #label>
+                  <div class="model-button-label">
+                    <span class="model-button-name">{{ selectedModelDisplayName }}</span>
+                    <span v-if="selectedModelPath" class="model-button-path">{{ selectedModelPath }}</span>
+                  </div>
+                </template>
+                <template #default>
+                  <div class="dropdown-list">
+                    <div v-if="!hasModelOptions" class="dropdown-empty">Loading models...</div>
+                    <template v-for="group in groupedModelOptions" :key="group.providerID">
+                      <div class="input-dropdown-group-label">{{ group.label }}</div>
+                      <DropdownItem v-for="model in group.models" :key="model.id" :value="model.id">
+                        <div class="model-dropdown-item">
+                          <span class="model-dropdown-name">{{ model.displayName }}</span>
+                          <span class="model-dropdown-path">{{ model.providerID }}/{{ model.id }}</span>
+                        </div>
+                      </DropdownItem>
+                    </template>
+                  </div>
+                </template>
+              </Dropdown>
+            </div>
+          </div>
+          <div class="input-field compact">
+            <Dropdown
+              v-model="selectedThinkingChoice"
+              :label="selectedThinkingLabel"
+              :placeholder="hasThinkingOptions ? 'Select variant' : 'Loading...'"
+              :disabled="!hasThinkingOptions"
+              button-class="input-control input-dropdown-button"
+              :button-style="agentButtonStyle"
+              popup-class="input-dropdown-popup"
+              auto-close
+              title="Variant (Ctrl-, / Ctrl-.)"
+            >
+              <template #default>
+                <div class="dropdown-list">
+                  <div v-if="!hasThinkingOptions" class="dropdown-empty">Loading...</div>
+                  <DropdownItem
+                    v-for="option in thinkingChoices"
+                    :key="option.key"
+                    :value="option"
+                  >
+                    <span class="dropdown-item-label">{{ option.label }}</span>
+                  </DropdownItem>
+                </div>
+              </template>
+            </Dropdown>
+          </div>
         </div>
-        <div class="input-field compact">
-          <select
-            id="thinking-select"
-            v-model="thinkingValue"
-            class="input-control"
-            :disabled="!hasThinkingOptions"
-            aria-label="Variant"
-            title="Variant (Ctrl-, / Ctrl-.)"
-          >
-            <option v-if="!hasThinkingOptions" value="">Loading...</option>
-            <option v-for="option in thinkingOptions" :key="option ?? '__default'" :value="option">
-              {{ option === undefined ? '<default>' : option }}
-            </option>
-          </select>
-        </div>
-      </div>
       <button
         type="button"
         class="input-button attach-button"
+        :disabled="props.canAttach === false"
         @click="triggerFileInput"
       >
         Attach
@@ -141,14 +184,18 @@
 
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue';
-type ModelOption = { id: string; label: string; providerID?: string; providerLabel?: string };
+import Dropdown from './Dropdown.vue';
+import DropdownItem from './Dropdown/Item.vue';
+type ModelOption = { id: string; label: string; displayName: string; providerID?: string; providerLabel?: string };
 type CommandOption = { name: string; description?: string; hints?: string[] };
+type AgentOption = { id: string; label: string; description?: string; color?: string };
+type ThinkingChoice = { key: string; value: string | undefined; label: string };
 
 const props = defineProps<{
   messageInput: string;
   canSend: boolean;
   selectedMode: string;
-  agentOptions: Array<{ id: string; label: string }>;
+  agentOptions: AgentOption[];
   hasAgentOptions: boolean;
   selectedModel: string;
   selectedThinking: string | undefined;
@@ -156,6 +203,7 @@ const props = defineProps<{
   thinkingOptions: Array<string | undefined>;
   hasModelOptions: boolean;
   hasThinkingOptions: boolean;
+  canAttach?: boolean;
   isThinking: boolean;
   canAbort: boolean;
   commands: CommandOption[];
@@ -181,7 +229,7 @@ const messageValue = computed({
 
 const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
-const modelSelectRef = ref<HTMLSelectElement | null>(null);
+const modelDropdownRef = ref<HTMLElement | null>(null);
 const activeCommandIndex = ref(0);
 const acceptMime = 'image/png,image/jpeg,image/gif,image/webp';
 
@@ -269,10 +317,13 @@ function prevCyclicIndex(current: string | undefined, options: Array<string | un
   return (index - 1 + options.length) % options.length;
 }
 
-function cycleAgent() {
+function cycleAgent(direction: 'next' | 'prev') {
   if (!props.hasAgentOptions) return false;
   const options = (props.agentOptions ?? []).map((option) => option.id);
-  const nextIndex = nextCyclicIndex(props.selectedMode, options);
+  const nextIndex =
+    direction === 'next'
+      ? nextCyclicIndex(props.selectedMode, options)
+      : prevCyclicIndex(props.selectedMode, options);
   if (nextIndex < 0) return false;
   emit('update:selected-mode', options[nextIndex]!);
   return true;
@@ -292,15 +343,12 @@ function cycleVariant(direction: 'next' | 'prev') {
 
 function openModelPicker() {
   if (!props.hasModelOptions) return false;
-  const modelSelect = modelSelectRef.value;
-  if (!modelSelect) return false;
-  modelSelect.focus();
-  const picker = modelSelect as HTMLSelectElement & { showPicker?: () => void };
-  if (typeof picker.showPicker === 'function') {
-    picker.showPicker();
-    return true;
-  }
-  modelSelect.click();
+  const root = modelDropdownRef.value;
+  if (!root) return false;
+  const button = root.querySelector('button');
+  if (!(button instanceof HTMLButtonElement)) return false;
+  button.focus();
+  button.click();
   return true;
 }
 
@@ -335,8 +383,9 @@ function handleKeydown(event: KeyboardEvent) {
     }
     return;
   }
-  if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.shiftKey && !event.altKey) {
-    if (!cycleAgent()) return;
+  if (event.key === 'Tab' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    const direction: 'next' | 'prev' = event.shiftKey ? 'prev' : 'next';
+    if (!cycleAgent(direction)) return;
     event.preventDefault();
     return;
   }
@@ -415,9 +464,66 @@ const thinkingValue = computed({
   set: (value) => emit('update:selected-thinking', value),
 });
 
+const selectedAgent = computed(() =>
+  (props.agentOptions ?? []).find((option) => option.id === props.selectedMode),
+);
+
+const selectedAgentLabel = computed(() => selectedAgent.value?.label ?? '');
+
+const agentButtonStyle = computed(() => {
+  const color = selectedAgent.value?.color;
+  if (!color) return undefined;
+  if (color.startsWith('#') && color.length === 7) {
+    return { borderColor: `${color}80` };
+  }
+  return { borderColor: color };
+});
+
+const agentButtonLabelStyle = computed(() => {
+  const color = selectedAgent.value?.color;
+  return color ? { color } : undefined;
+});
+
+function agentOptionNameStyle(agent: AgentOption) {
+  return agent.color ? { color: agent.color } : undefined;
+}
+
+const selectedModelOption = computed(() =>
+  (props.modelOptions ?? []).find((option) => option.id === props.selectedModel),
+);
+
+const selectedModelDisplayName = computed(() => selectedModelOption.value?.displayName ?? '');
+
+const selectedModelPath = computed(() => {
+  const opt = selectedModelOption.value;
+  if (!opt) return '';
+  return `${opt.providerID ?? ''}/${opt.id}`;
+});
+
+const thinkingChoices = computed<ThinkingChoice[]>(() =>
+  (props.thinkingOptions ?? []).map((option) => ({
+    key: option ?? '__default',
+    value: option,
+    label: option === undefined ? '<default>' : option,
+  })),
+);
+
+const selectedThinkingChoice = computed<ThinkingChoice | undefined>({
+  get: () => thinkingChoices.value.find((option) => option.value === props.selectedThinking),
+  set: (value) => {
+    thinkingValue.value = value?.value;
+  },
+});
+
+const selectedThinkingLabel = computed(() => selectedThinkingChoice.value?.label ?? '');
+
 const groupedModelOptions = computed(() => {
   const grouped = new Map<string, { providerID: string; label: string; models: ModelOption[] }>();
-  (props.modelOptions ?? []).forEach((model) => {
+  const models = (props.modelOptions ?? []).map((model) => ({
+    ...model,
+    displayName: model.displayName || model.label,
+  }));
+  models.forEach((model) => {
     const providerID = model.providerID?.trim() || 'unknown';
     const providerLabel = model.providerLabel?.trim() || providerID;
     const existing = grouped.get(providerID);
@@ -498,6 +604,10 @@ const inputMessageStyle = computed(() => {
   height: 32px;
 }
 
+.input-dropdown-root {
+  width: 100%;
+}
+
 .input-field {
   flex: 1 1 0;
   min-width: 0;
@@ -510,7 +620,7 @@ const inputMessageStyle = computed(() => {
   min-width: 160px;
 }
 
-.input-control {
+:deep(.input-control) {
   width: 100%;
   background: #0b1320;
   color: #e2e8f0;
@@ -523,8 +633,111 @@ const inputMessageStyle = computed(() => {
   box-sizing: border-box;
 }
 
-.input-control:focus-visible {
+:deep(.input-control):focus-visible {
   outline: none;
+}
+
+:deep(.input-dropdown-button) {
+  height: 32px;
+}
+
+:deep(.input-dropdown-popup) {
+  max-height: 280px;
+}
+
+.dropdown-list {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dropdown-empty {
+  padding: 6px 8px;
+  font-size: 12px;
+  color: #94a3b8;
+}
+
+.dropdown-item-label {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.input-dropdown-group-label {
+  font-size: 10px;
+  color: #94a3b8;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  padding: 6px 8px 2px;
+}
+
+.agent-dropdown-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.agent-dropdown-name {
+  font-size: 12px;
+  color: #e2e8f0;
+  line-height: 1.2;
+}
+
+.agent-dropdown-description {
+  font-size: 10px;
+  color: #94a3b8;
+  line-height: 1.2;
+}
+
+.model-button-label {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow: hidden;
+  line-height: 1.15;
+  text-align: left;
+}
+
+.model-button-name {
+  font-size: 12px;
+  color: #e2e8f0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-button-path {
+  font-size: 9px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.model-dropdown-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.model-dropdown-name {
+  font-size: 12px;
+  color: #e2e8f0;
+  line-height: 1.2;
+}
+
+.model-dropdown-path {
+  font-size: 10px;
+  color: #94a3b8;
+  line-height: 1.2;
 }
 
 .input-textarea {

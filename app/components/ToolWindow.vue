@@ -37,7 +37,7 @@
         @reject="onQuestionReject"
       />
       <DiffViewer
-        v-else-if="entry.toolName === 'apply_patch' && entry.content"
+        v-else-if="entry.toolLang === 'diff' && entry.content"
         :code="''"
         :patch="entry.content"
         :lang="entry.toolLang ?? 'diff'"
@@ -56,6 +56,7 @@
         @rendered="onRendered"
       />
     </div>
+    <div v-if="statusBarText" class="term-statusbar">{{ statusBarText }}</div>
     <div
       v-if="showResizer"
       class="term-resizer"
@@ -103,6 +104,7 @@ type ToolWindowEntry = {
   messageId?: string;
   sessionId?: string;
   messageAgent?: string;
+  messageModel?: string;
   callId?: string;
   zIndex?: number;
   width?: number;
@@ -144,11 +146,25 @@ const showResizer = computed(
     entry.value.isQuestion,
 );
 
+const isFloatingMessage = computed(
+  () => entry.value.isReasoning || entry.value.isSubagentMessage,
+);
+
 const agentColor = computed(() => {
   if (entry.value.isMessage) {
     return props.resolveAgentTone(entry.value.messageAgent);
   }
   return undefined;
+});
+
+const statusBarText = computed(() => {
+  if (!isFloatingMessage.value) return '';
+  const parts: string[] = [];
+  const agent = entry.value.messageAgent?.trim();
+  if (agent) parts.push(agent.charAt(0).toUpperCase() + agent.slice(1));
+  const model = entry.value.messageModel?.trim();
+  if (model) parts.push(model);
+  return parts.join(' · ');
 });
 
 const termClass = computed(() => ({
@@ -158,6 +174,7 @@ const termClass = computed(() => ({
   'is-apply-patch': entry.value.toolName === 'apply_patch',
   'is-reasoning': entry.value.isReasoning || entry.value.isSubagentMessage,
   'is-shell': entry.value.isShell,
+  'is-bash': entry.value.toolName === 'bash',
   'is-permission': entry.value.isPermission,
   'is-question': entry.value.isQuestion,
 }));
@@ -173,26 +190,11 @@ const termStyle = computed(() => {
   
   if (agentColor.value) {
     const c = agentColor.value;
+    base['--agent-color'] = c;
     base.borderColor = c;
     base['--term-border-color'] = c;
   }
   return base;
-});
-
-const titlebarStyle = computed(() => {
-  if (agentColor.value) {
-    const c = agentColor.value;
-    let bg = c;
-    if (c.startsWith('#') && c.length === 7) {
-      bg = `${c}2E`; // ~0.18
-    }
-    return {
-      background: bg,
-      borderBottomColor: `${c}59`, // ~0.35
-      color: '#e2e8f0'
-    };
-  }
-  return {};
 });
 
 const renderCode = computed(() => {
@@ -257,12 +259,12 @@ function onRendered() {
   position: absolute;
   font-size: var(--term-font-size);
   --message-line-height: var(--term-line-height);
-  --term-border-color: #1f2937;
+  --term-border-color: #3a4150;
   width: var(--term-width);
   height: var(--term-height);
-  background: #050505;
+  background: #1a1d24;
   color: #f3f4f6;
-  border: 1px solid #1f2937;
+  border: 1px solid #3a4150;
   overflow: hidden;
   font-family: var(--term-font-family);
   line-height: var(--term-line-height);
@@ -273,21 +275,43 @@ function onRendered() {
   pointer-events: auto;
 }
 
-.term.is-message,
-.term.is-shell,
-.term.is-message.agent-tone-build,
-.term.is-message.agent-tone-plan {
-  background: #050505;
-  border-color: #1f2937;
-  --term-border-color: #1f2937;
+.term.is-message {
+  background: #1a1d24;
+  border-color: #3a4150;
+  --term-border-color: #3a4150;
 }
 
-.term.is-message .term-titlebar,
-.term.is-message.agent-tone-build .term-titlebar,
-.term.is-message.agent-tone-plan .term-titlebar {
-  background: rgba(2, 6, 23, 0.95);
+.term.is-message .term-titlebar {
+  background: rgba(36, 40, 50, 0.95);
   color: #cbd5e1;
-  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+  border-bottom: 1px solid rgba(90, 100, 120, 0.35);
+}
+
+.term.is-reasoning {
+  --agent-color: #64748b;
+  background: color-mix(in srgb, var(--agent-color) 12%, #1a1d24);
+  border-color: var(--agent-color);
+  --term-border-color: var(--agent-color);
+}
+
+.term.is-reasoning .term-titlebar {
+  background: color-mix(in srgb, var(--agent-color) 22%, rgba(36, 40, 50, 0.95));
+  color: color-mix(in srgb, var(--agent-color) 40%, #e2e8f0);
+  border-bottom: 1px solid color-mix(in srgb, var(--agent-color) 35%, rgba(90, 100, 120, 0.35));
+}
+
+.term.is-shell,
+.term.is-bash {
+  background: #190a24;
+  border-color: #a855f7;
+  --term-border-color: #a855f7;
+}
+
+.term.is-shell .term-titlebar,
+.term.is-bash .term-titlebar {
+  background: rgba(168, 85, 247, 0.18);
+  color: #e9d5ff;
+  border-bottom: 1px solid rgba(168, 85, 247, 0.35);
 }
 
 .term.is-permission {
@@ -304,9 +328,9 @@ function onRendered() {
 
 .term.is-apply-patch,
 .term.is-write {
-  background: #190a24;
-  border-color: #a855f7;
-  --term-border-color: #a855f7;
+  background: #0a1628;
+  border-color: #3b82f6;
+  --term-border-color: #3b82f6;
 }
 
 .term.is-tool-error {
@@ -317,9 +341,9 @@ function onRendered() {
 
 .term.is-apply-patch .term-titlebar,
 .term.is-write .term-titlebar {
-  background: rgba(168, 85, 247, 0.18);
-  color: #e9d5ff;
-  border-bottom: 1px solid rgba(168, 85, 247, 0.35);
+  background: rgba(59, 130, 246, 0.18);
+  color: #bfdbfe;
+  border-bottom: 1px solid rgba(59, 130, 246, 0.35);
 }
 
 .term.is-tool-error .term-titlebar {
@@ -344,11 +368,11 @@ function onRendered() {
   height: 22px;
   display: flex;
   align-items: center;
-  padding: 0 10px;
+  padding: 0 4px;
   font-size: 12px;
   color: #cbd5e1;
-  background: rgba(2, 6, 23, 0.95);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(36, 40, 50, 0.95);
+  border-bottom: 1px solid rgba(90, 100, 120, 0.35);
   cursor: grab;
   user-select: none;
   white-space: nowrap;
@@ -364,7 +388,7 @@ function onRendered() {
   margin: 0;
   white-space: normal;
   line-height: var(--term-line-height);
-  padding: 2px;
+  padding: 2px 4px;
   flex: 1;
   overflow: hidden;
 }
@@ -374,11 +398,26 @@ function onRendered() {
   overflow: auto;
 }
 
-.term.is-shell .term-inner,
 .term.is-permission .term-inner,
 .term.is-question .term-inner {
   padding: 0;
   overflow: hidden;
+}
+
+.term-statusbar {
+  flex-shrink: 0;
+  height: 18px;
+  display: flex;
+  align-items: center;
+  padding: 0 4px;
+  font-size: 10px;
+  color: color-mix(in srgb, var(--agent-color, #64748b) 60%, #94a3b8);
+  background: color-mix(in srgb, var(--agent-color, #64748b) 6%, transparent);
+  border-top: 1px solid color-mix(in srgb, var(--agent-color, #64748b) 18%, transparent);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  user-select: none;
 }
 
 .xterm-host {

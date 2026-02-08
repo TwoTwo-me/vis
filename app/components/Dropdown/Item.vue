@@ -55,6 +55,7 @@ function onClick() {
   gap: 8px;
   padding: 6px 8px;
   border-radius: 8px;
+  font-size: 12px;
 }
 
 .ui-dropdown-item.is-active {
@@ -62,7 +63,8 @@ function onClick() {
   border: 1px solid rgba(59, 130, 246, 0.45);
 }
 
-.ui-dropdown-item:hover {
+.ui-dropdown-item:hover,
+.ui-dropdown-item[aria-selected="true"] {
   background: rgba(15, 23, 42, 0.9);
 }
 

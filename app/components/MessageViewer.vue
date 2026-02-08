@@ -149,7 +149,7 @@ onBeforeUnmount(() => {
   color: #8a8a8a;
   white-space: pre;
   font-variant-numeric: tabular-nums;
-  padding: 0 1ch 0 0;
+  padding: 0 1ch 0 1ch;
 }
 
 .message-content :deep(.code-gutter.span-2) {
@@ -161,7 +161,7 @@ onBeforeUnmount(() => {
   min-height: 1em;
   white-space: pre;
   box-sizing: border-box;
-  padding-left: 2ch;
+  padding-left: 1ch;
 }
 
 .message-viewer.no-gutter .message-content :deep(code) {

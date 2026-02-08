@@ -121,6 +121,161 @@ function buildCodeRows(lines: string[], mode: 'none' | 'single' | 'double', gutt
     .join('\n');
 }
 
+/**
+ * Generate a unified diff from two strings using a simple LCS-based algorithm.
+ * Produces output compatible with the existing buildDiffHtmlFromCode parser.
+ */
+function generateUnifiedDiff(before: string, after: string, contextLines = 3): string {
+  const a = before.split('\n');
+  const b = after.split('\n');
+
+  // LCS via Hunt-McIlroy / simple DP for line-level diff
+  // Build edit script: array of {type, line} where type is ' ', '+', '-'
+  const n = a.length;
+  const m = b.length;
+
+  // Myers diff (linear space, O(ND) time)
+  const max = n + m;
+  const vSize = 2 * max + 1;
+  const v = new Int32Array(vSize);
+  v.fill(-1);
+  const offset = max;
+  v[offset + 1] = 0;
+
+  type Snake = { prevK: number; prevD: number; x: number; y: number };
+  const trace: Array<Int32Array> = [];
+
+  outer: for (let d = 0; d <= max; d++) {
+    const snap = new Int32Array(vSize);
+    snap.set(v);
+    trace.push(snap);
+    for (let k = -d; k <= d; k += 2) {
+      let x: number;
+      if (k === -d || (k !== d && v[offset + k - 1] < v[offset + k + 1])) {
+        x = v[offset + k + 1];
+      } else {
+        x = v[offset + k - 1] + 1;
+      }
+      let y = x - k;
+      while (x < n && y < m && a[x] === b[y]) {
+        x++;
+        y++;
+      }
+      v[offset + k] = x;
+      if (x >= n && y >= m) break outer;
+    }
+  }
+
+  // Backtrack to get the edit path
+  interface Edit { type: ' ' | '+' | '-'; text: string }
+  const edits: Edit[] = [];
+  let cx = n;
+  let cy = m;
+  for (let d = trace.length - 1; d >= 0; d--) {
+    const snap = trace[d];
+    const k = cx - cy;
+    let prevK: number;
+    if (k === -d || (k !== d && snap[offset + k - 1] < snap[offset + k + 1])) {
+      prevK = k + 1;
+    } else {
+      prevK = k - 1;
+    }
+    const prevX = snap[offset + prevK];
+    const prevY = prevX - prevK;
+
+    // Diagonal (equal lines)
+    while (cx > prevX && cy > prevY) {
+      cx--;
+      cy--;
+      edits.push({ type: ' ', text: a[cx] });
+    }
+
+    if (d > 0) {
+      if (cx === prevX) {
+        // Insertion
+        cy--;
+        edits.push({ type: '+', text: b[cy] });
+      } else {
+        // Deletion
+        cx--;
+        edits.push({ type: '-', text: a[cx] });
+      }
+    }
+  }
+  edits.reverse();
+
+  if (edits.length === 0) return '';
+
+  // Group into hunks with context
+  type Hunk = { oldStart: number; oldCount: number; newStart: number; newCount: number; lines: string[] };
+  const hunks: Hunk[] = [];
+  let oldLine = 1;
+  let newLine = 1;
+
+  // Find change regions
+  const changeIndices: number[] = [];
+  edits.forEach((e, i) => {
+    if (e.type !== ' ') changeIndices.push(i);
+  });
+
+  if (changeIndices.length === 0) return '';
+
+  // Merge nearby changes into hunks
+  let hunkStart = 0;
+  let hunkEnd = 0;
+  const groups: Array<[number, number]> = [];
+  let groupStart = changeIndices[0];
+  let groupEnd = changeIndices[0];
+
+  for (let i = 1; i < changeIndices.length; i++) {
+    if (changeIndices[i] - groupEnd <= contextLines * 2 + 1) {
+      groupEnd = changeIndices[i];
+    } else {
+      groups.push([groupStart, groupEnd]);
+      groupStart = changeIndices[i];
+      groupEnd = changeIndices[i];
+    }
+  }
+  groups.push([groupStart, groupEnd]);
+
+  for (const [gStart, gEnd] of groups) {
+    const ctxStart = Math.max(0, gStart - contextLines);
+    const ctxEnd = Math.min(edits.length - 1, gEnd + contextLines);
+
+    let oLine = 1;
+    let nLine = 1;
+    for (let i = 0; i < ctxStart; i++) {
+      if (edits[i].type === ' ' || edits[i].type === '-') oLine++;
+      if (edits[i].type === ' ' || edits[i].type === '+') nLine++;
+    }
+
+    const hunkLines: string[] = [];
+    let oldCount = 0;
+    let newCount = 0;
+    for (let i = ctxStart; i <= ctxEnd; i++) {
+      const e = edits[i];
+      hunkLines.push(`${e.type}${e.text}`);
+      if (e.type === ' ' || e.type === '-') oldCount++;
+      if (e.type === ' ' || e.type === '+') newCount++;
+    }
+
+    hunks.push({
+      oldStart: oLine,
+      oldCount,
+      newStart: nLine,
+      newCount,
+      lines: hunkLines,
+    });
+  }
+
+  const result: string[] = [];
+  for (const hunk of hunks) {
+    result.push(`@@ -${hunk.oldStart},${hunk.oldCount} +${hunk.newStart},${hunk.newCount} @@`);
+    result.push(...hunk.lines);
+  }
+  return result.join('\n');
+}
+
 function applyPatchToCode(code: string, patch: string) {
   const lines = code.split('\n');
   let offset = 0;
@@ -172,10 +327,23 @@ function extractShikiLines(html: string) {
   });
 }
 
+function isDiffMetadataLine(line: string) {
+  return (
+    line.startsWith('diff ') ||
+    line.startsWith('index ') ||
+    line.startsWith('Index: ') ||
+    line.startsWith('===') ||
+    line.startsWith('---') ||
+    line.startsWith('+++') ||
+    line.startsWith('***')
+  );
+}
+
 function buildDiffGutterLines(source: string) {
   const lines = source.split('\n');
   let oldLine = 0;
   let newLine = 0;
+  let inHunk = false;
   const oldValues: Array<string> = [];
   const newValues: Array<string> = [];
 
@@ -186,17 +354,18 @@ function buildDiffGutterLines(source: string) {
         oldLine = Number(match[1]);
         newLine = Number(match[2]);
       }
+      inHunk = true;
       oldValues.push('');
       newValues.push('');
       return;
     }
-    if (
-      line.startsWith('diff ') ||
-      line.startsWith('index ') ||
-      line.startsWith('---') ||
-      line.startsWith('+++') ||
-      line.startsWith('***')
-    ) {
+    if (isDiffMetadataLine(line) || line.startsWith('\\')) {
+      inHunk = false;
+      oldValues.push('');
+      newValues.push('');
+      return;
+    }
+    if (!inHunk) {
       oldValues.push('');
       newValues.push('');
       return;
@@ -213,15 +382,20 @@ function buildDiffGutterLines(source: string) {
       oldLine += 1;
       return;
     }
+    if (line.startsWith(' ')) {
+      oldValues.push(String(oldLine));
+      newValues.push(String(newLine));
+      oldLine += 1;
+      newLine += 1;
+      return;
+    }
     if (oldLine === 0 && newLine === 0) {
       oldValues.push('');
       newValues.push('');
       return;
     }
-    oldValues.push(String(oldLine));
-    newValues.push(String(newLine));
-    oldLine += 1;
-    newLine += 1;
+    oldValues.push('');
+    newValues.push('');
   });
 
   return { oldValues, newValues };
@@ -329,6 +503,7 @@ function buildDiffHtmlFromCode(
     const diffLines = diff.split('\n');
     let oldLine = 0;
     let newLine = 0;
+    let inHunk = false;
     const output: DiffRow[] = [];
     diffLines.forEach((line) => {
       if (line.startsWith('@@')) {
@@ -337,16 +512,16 @@ function buildDiffHtmlFromCode(
           oldLine = Number(match[1]);
           newLine = Number(match[2]);
         }
+        inHunk = true;
         output.push({ html: `<span class="line">${escapeHtml(line)}</span>`, rowClass: 'line-hunk' });
         return;
       }
-      if (
-        line.startsWith('diff ') ||
-        line.startsWith('index ') ||
-        line.startsWith('---') ||
-        line.startsWith('+++') ||
-        line.startsWith('***')
-      ) {
+      if (isDiffMetadataLine(line) || line.startsWith('\\')) {
+        inHunk = false;
+        output.push({ html: `<span class="line">${escapeHtml(line)}</span>`, rowClass: 'line-header' });
+        return;
+      }
+      if (!inHunk) {
         output.push({ html: `<span class="line">${escapeHtml(line)}</span>`, rowClass: 'line-header' });
         return;
       }
@@ -360,6 +535,10 @@ function buildDiffHtmlFromCode(
         const htmlLine = beforeLines[oldLine - 1] ?? `<span class="line">${escapeHtml(line.slice(1))}</span>`;
         output.push({ html: htmlLine, rowClass: 'line-removed' });
         oldLine += 1;
+        return;
+      }
+      if (!line.startsWith(' ')) {
+        output.push({ html: `<span class="line">${escapeHtml(line)}</span>`, rowClass: 'line-header' });
         return;
       }
       const htmlLine = beforeLines[oldLine - 1] ?? `<span class="line">${escapeHtml(line.replace(/^ /, ''))}</span>`;
@@ -393,6 +572,21 @@ function renderRequest(request: RenderRequest): Promise<string> {
       request.theme,
       request.gutterMode ?? 'double',
     );
+  }
+
+  // before/after without patch — generate unified diff from the two texts
+  if (request.after !== undefined) {
+    const patch = generateUnifiedDiff(request.code, request.after);
+    if (patch) {
+      return buildDiffHtmlFromCode(
+        request.code,
+        request.after,
+        patch,
+        request.lang,
+        request.theme,
+        request.gutterMode ?? 'double',
+      );
+    }
   }
 
   if (request.grepPattern !== undefined) {

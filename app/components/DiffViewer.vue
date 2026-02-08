@@ -34,7 +34,7 @@ async function startRender() {
   await nextTick();
   await new Promise((resolve) => requestAnimationFrame(resolve));
   const codePayload = props.code;
-  if (!props.patch && !codePayload.trim()) {
+  if (!props.patch && !props.after && !codePayload.trim()) {
     state.error = 'Render failed';
     state.isLoading = false;
     return;
@@ -128,7 +128,7 @@ onBeforeUnmount(() => {
   color: #8a8a8a;
   white-space: pre;
   font-variant-numeric: tabular-nums;
-  padding: 0 1ch 0 0;
+  padding: 0 1ch 0 1ch;
 }
 
 .diff-content :deep(.code-gutter.span-2) {
@@ -140,7 +140,7 @@ onBeforeUnmount(() => {
   min-height: 1em;
   white-space: pre;
   box-sizing: border-box;
-  padding-left: 2ch;
+  padding-left: 1ch;
 }
 
 

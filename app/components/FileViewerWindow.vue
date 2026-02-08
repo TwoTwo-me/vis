@@ -12,13 +12,25 @@
         ×
       </button>
     </div>
+    <div v-if="entry.diffTabs && entry.diffTabs.length > 1" class="viewer-tabs">
+      <button
+        v-for="(tab, i) in entry.diffTabs"
+        :key="tab.file"
+        type="button"
+        class="viewer-tab"
+        :class="{ active: i === activeTabIndex }"
+        @click="activeTabIndex = i"
+      >
+        {{ basename(tab.file) }}
+      </button>
+    </div>
     <div class="viewer-body" @scroll="onFloatingScroll" @wheel="onFloatingWheel">
       <DiffViewer
         v-if="entry.isDiff"
-        :code="entry.diffCode ?? ''"
-        :after="entry.diffAfter"
-        :patch="entry.content"
-        :lang="entry.diffLang ?? 'text'"
+        :code="activeDiffCode"
+        :after="activeDiffAfter"
+        :patch="(!entry.diffTabs || entry.diffTabs.length === 0) ? entry.content : ''"
+        :lang="activeDiffLang"
         :theme="theme"
       />
       <FileViewer v-else :entry="entry" :theme="theme" />
@@ -28,7 +40,7 @@
 </template>
 
 <script setup lang="ts">
-import { computed } from 'vue';
+import { computed, ref } from 'vue';
 import DiffViewer from './DiffViewer.vue';
 import FileViewer from './FileViewer.vue';
 
@@ -47,6 +59,7 @@ type ViewerEntry = {
   diffCode?: string;
   diffAfter?: string;
   diffLang?: string;
+  diffTabs?: Array<{ file: string; before: string; after: string }>;
   toolGutterMode?: 'default' | 'none' | 'grep-source';
 };
 
@@ -63,6 +76,39 @@ const props = defineProps<{
 }>();
 
 const entry = computed(() => props.entry);
+
+const activeTabIndex = ref(0);
+
+const activeDiffCode = computed(() => {
+  const tabs = props.entry.diffTabs;
+  if (!tabs || tabs.length === 0) return props.entry.diffCode ?? '';
+  return tabs[activeTabIndex.value]?.before ?? '';
+});
+
+const activeDiffAfter = computed(() => {
+  const tabs = props.entry.diffTabs;
+  if (!tabs || tabs.length === 0) return props.entry.diffAfter;
+  return tabs[activeTabIndex.value]?.after;
+});
+
+const activeDiffLang = computed(() => {
+  const tabs = props.entry.diffTabs;
+  if (!tabs || tabs.length === 0) return props.entry.diffLang ?? 'text';
+  const file = tabs[activeTabIndex.value]?.file ?? '';
+  const ext = file.split('.').pop() ?? '';
+  const langMap: Record<string, string> = {
+    ts: 'typescript', tsx: 'tsx', js: 'javascript', jsx: 'jsx',
+    vue: 'vue', css: 'css', scss: 'scss', html: 'html',
+    json: 'json', md: 'markdown', py: 'python', rs: 'rust',
+    go: 'go', rb: 'ruby', java: 'java', c: 'c', cpp: 'cpp',
+    sh: 'bash', yaml: 'yaml', yml: 'yaml', toml: 'toml',
+  };
+  return langMap[ext] ?? 'text';
+});
+
+function basename(filepath: string) {
+  return filepath.split('/').pop() ?? filepath;
+}
 
 const style = computed(() => ({
   left: `${entry.value.x ?? 0}px`,
@@ -98,14 +144,50 @@ function onClose() {
 </script>
 
 <style scoped>
+.viewer-tabs {
+  display: flex;
+  gap: 0;
+  background: rgba(26, 29, 36, 0.95);
+  border-bottom: 1px solid rgba(90, 100, 120, 0.35);
+  overflow-x: auto;
+  scrollbar-width: none;
+  flex-shrink: 0;
+}
+
+.viewer-tabs::-webkit-scrollbar {
+  display: none;
+}
+
+.viewer-tab {
+  border: 0;
+  background: transparent;
+  color: #8a8f9a;
+  font-size: 11px;
+  font-family: inherit;
+  padding: 3px 10px;
+  cursor: pointer;
+  white-space: nowrap;
+  border-bottom: 2px solid transparent;
+  transition: color 0.15s, border-color 0.15s;
+}
+
+.viewer-tab:hover {
+  color: #cbd5e1;
+}
+
+.viewer-tab.active {
+  color: #e2e8f0;
+  border-bottom-color: #60a5fa;
+}
+
 .file-viewer {
   position: absolute;
   font-size: var(--term-font-size);
   width: var(--term-width);
   height: var(--term-height);
-  background: #050505;
+  background: #1a1d24;
   color: #f3f4f6;
-  border: 1px solid #1f2937;
+  border: 1px solid #3a4150;
   overflow: hidden;
   font-family: var(--term-font-family);
   line-height: var(--term-line-height);
@@ -120,11 +202,11 @@ function onClose() {
   display: flex;
   align-items: center;
   gap: 8px;
-  padding: 0 8px;
+  padding: 0 4px;
   font-size: 12px;
   color: #cbd5e1;
-  background: rgba(2, 6, 23, 0.95);
-  border-bottom: 1px solid rgba(148, 163, 184, 0.28);
+  background: rgba(36, 40, 50, 0.95);
+  border-bottom: 1px solid rgba(90, 100, 120, 0.35);
   cursor: grab;
   user-select: none;
 }
@@ -155,7 +237,7 @@ function onClose() {
 .viewer-body {
   flex: 1;
   min-height: 0;
-  padding: 2px;
+  padding: 2px 4px;
   overflow: auto;
   white-space: normal;
 }
@@ -181,6 +263,6 @@ function onClose() {
   height: 0;
   border-style: solid;
   border-width: 0 0 5px 5px;
-  border-color: transparent transparent #1f2937 transparent;
+  border-color: transparent transparent #3a4150 transparent;
 }
 </style>

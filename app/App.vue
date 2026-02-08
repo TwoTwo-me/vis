@@ -3277,39 +3277,73 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
     });
 
     const history = data
-      .map((message) => {
+      .map((message, sourceIndex) => {
         const info = message.info as Record<string, unknown> | undefined;
         const parts = message.parts as unknown;
         const text = extractMessageTextFromParts(parts) ?? '';
         const attachments = extractImageAttachmentsFromParts(parts);
-        if (!text.trim() && attachments.length === 0) return null;
         const id = typeof info?.id === 'string' ? info.id : undefined;
         const role = typeof info?.role === 'string' ? info.role : undefined;
+        const parentID = typeof info?.parentID === 'string' ? info.parentID : undefined;
         const finish = typeof info?.finish === 'string' ? info.finish : undefined;
         const meta = parseUserMessageMeta(info);
         const usage = resolveMessageUsageFromInfo(info);
         const messageTime = extractMessageTime(info);
         if (!id) return null;
-        return { id, role, finish, text, attachments, meta, usage, messageTime };
+        if (!parentID && (!text.trim() && attachments.length === 0)) {
+          return {
+            id,
+            role,
+            parentID,
+            finish,
+            text,
+            attachments,
+            meta,
+            usage,
+            messageTime,
+            info,
+            sourceIndex,
+          };
+        }
+        if (parentID && !text.trim() && attachments.length === 0) return null;
+        return {
+          id,
+          role,
+          parentID,
+          finish,
+          text,
+          attachments,
+          meta,
+          usage,
+          messageTime,
+          info,
+          sourceIndex,
+        };
       })
       .filter(
         (entry): entry is {
           id: string;
           role?: string;
+          parentID?: string;
           finish?: string;
           text: string;
           attachments: MessageAttachment[];
           meta: UserMessageMeta | null;
           usage: MessageUsage | null;
           messageTime?: number;
+          info?: Record<string, unknown>;
+          sourceIndex: number;
         } => Boolean(entry),
       );
+    const historyMeta = new Map<string, {
+      displayMeta: ReturnType<typeof resolveUserMessageDisplay>;
+      resolvedTime?: number;
+      usageProviderId?: string;
+      usageModelId?: string;
+      historyUsage?: MessageUsage;
+    }>();
 
     history.forEach((entry) => {
-      const isUserEntry = entry.role === 'user';
-      const isAssistantEntry = !isUserEntry;
-      const isSessionWindowEntry = isAssistantEntry && !isSubagentMessage;
-
       storeUserMessageMeta(entry.id, entry.meta);
       const resolvedMeta = resolveUserMessageMetaForMessage(entry.id, undefined, entry.meta);
       const displayMeta = resolveUserMessageDisplay(resolvedMeta);
@@ -3328,87 +3362,164 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
           }
         : undefined;
 
-      if (isSessionWindowEntry && entry.finish !== 'stop') {
-        // For past intermediate messages (history), only store metadata — no OutputPanel entry.
-        // Only final answers (finish=stop) are shown in OutputPanel for history.
-        const messageKey = buildMessageKey(entry.id, sessionId);
-        if (historyUsage) messageUsageByKey.set(messageKey, historyUsage);
-        return;
-      }
-
       const messageKey = buildMessageKey(entry.id, sessionId);
-      if (messageIndexById.has(messageKey)) return;
       if (historyUsage) messageUsageByKey.set(messageKey, historyUsage);
+      historyMeta.set(entry.id, {
+        displayMeta,
+        resolvedTime,
+        usageProviderId,
+        usageModelId,
+        historyUsage,
+      });
+    });
+
+    if (isSubagentMessage) {
+      history.forEach((entry) => {
+        const isUserEntry = entry.role === 'user';
+        const isAssistantEntry = !isUserEntry;
+        const messageKey = buildMessageKey(entry.id, sessionId);
+        if (messageIndexById.has(messageKey)) return;
+        const resolved = historyMeta.get(entry.id);
+        const header = '';
+        const time = Date.now();
+        const text = `${header}${entry.text}`;
+        const messageColumns = 52;
+        const visibleLines = 12;
+        const lines = countWrappedLines(text, messageColumns);
+        const overflowLines = Math.max(0, lines - visibleLines);
+        const lineHeight = 16;
+        const scrollDistance = Math.max(0, overflowLines * lineHeight);
+        const scrollDuration =
+          overflowLines > 0 ? Math.min(0.25, Math.max(0.08, overflowLines * 0.01)) : 0;
+        const expiresAt = getSubagentExpiry(sessionId);
+        const randomPosition = getRandomWindowPosition();
+        queue.value.push({
+          time,
+          expiresAt,
+          x: randomPosition.x,
+          y: randomPosition.y,
+          header,
+          content: entry.text,
+          role: isUserEntry ? 'user' : 'assistant',
+          messageAgent: resolved?.displayMeta?.agent,
+          messageModel: resolved?.displayMeta?.model,
+          messageProviderId: resolved?.usageProviderId,
+          messageModelId: resolved?.usageModelId,
+          messageUsage: resolved?.historyUsage,
+          messageVariant: resolved?.displayMeta?.variant,
+          messageTime: resolved?.resolvedTime,
+          scroll: overflowLines > 0,
+          scrollDistance,
+          scrollDuration,
+          html: '',
+          attachments: entry.attachments,
+          isWrite: false,
+          isMessage: true,
+          isSubagentMessage,
+          isFinalAnswer: isAssistantEntry && entry.finish === 'stop',
+          messageId: entry.id,
+          messageKey,
+          follow: true,
+          sessionId,
+          zIndex: nextWindowZ(),
+        });
+        if (entry.attachments.length > 0) {
+          messageAttachmentsById.set(messageKey, entry.attachments);
+        }
+        messageIndexById.set(messageKey, queue.value.length - 1);
+        messageContentById.set(messageKey, entry.text);
+      });
+      return;
+    }
+
+    // Build round groups
+    const roundRoots = new Map<string, typeof history[0]>();
+    const roundChildren = new Map<string, Array<typeof history[0]>>();
+    for (const entry of history) {
+      if (!entry.parentID) {
+        roundRoots.set(entry.id, entry);
+        if (!roundChildren.has(entry.id)) roundChildren.set(entry.id, []);
+      } else {
+        const children = roundChildren.get(entry.parentID) ?? [];
+        children.push(entry);
+        roundChildren.set(entry.parentID, children);
+      }
+    }
+
+    for (const root of history) {
+      if (root.parentID) continue;
+      if (!roundRoots.has(root.id)) continue;
+      const messageKey = buildMessageKey(root.id, sessionId);
+      if (messageIndexById.has(messageKey)) continue;
+      const rootResolved = historyMeta.get(root.id);
       const header = '';
       const time = Date.now();
-      const text = `${header}${entry.text}`;
-      const messageColumns = 52;
-      const visibleLines = 12;
-      const lines = countWrappedLines(text, messageColumns);
-      const overflowLines = Math.max(0, lines - visibleLines);
-      const lineHeight = 16;
-      const scrollDistance = Math.max(0, overflowLines * lineHeight);
-      const scrollDuration =
-        overflowLines > 0 ? Math.min(0.25, Math.max(0.08, overflowLines * 0.01)) : 0;
-      const expiresAt = isSubagentMessage ? getSubagentExpiry(sessionId) : time + 1000 * 60 * 30;
-      const randomPosition = isSubagentMessage ? getRandomWindowPosition() : { x: 0, y: 0 };
+      const expiresAt = time + 1000 * 60 * 30;
+      const roundItems = [root, ...(roundChildren.get(root.id) ?? [])].sort((a, b) => {
+        const aTime = typeof a.messageTime === 'number' ? a.messageTime : undefined;
+        const bTime = typeof b.messageTime === 'number' ? b.messageTime : undefined;
+        if (aTime !== undefined && bTime !== undefined && aTime !== bTime) return aTime - bTime;
+        return a.sourceIndex - b.sourceIndex;
+      });
+      const roundMessages: RoundMessage[] = roundItems.map((item) => {
+        const resolved = historyMeta.get(item.id);
+        return {
+          messageId: item.id,
+          role: item.role === 'user' ? 'user' : 'assistant',
+          content: item.text,
+          attachments: item.attachments.length > 0 ? item.attachments : undefined,
+          agent: resolved?.displayMeta?.agent,
+          model: resolved?.displayMeta?.model,
+          providerId: resolved?.usageProviderId,
+          modelId: resolved?.usageModelId,
+          variant: resolved?.displayMeta?.variant,
+          time: resolved?.resolvedTime,
+          usage: resolved?.historyUsage,
+        };
+      });
+      const roundDiffs = root.role === 'user' ? extractSummaryDiffs(root.info) : [];
+
       queue.value.push({
         time,
         expiresAt,
-        x: randomPosition.x,
-        y: randomPosition.y,
+        x: 0,
+        y: 0,
         header,
-        content: entry.text,
-        role: isUserEntry ? 'user' : 'assistant',
-        messageAgent: displayMeta?.agent,
-        messageModel: displayMeta?.model,
-        messageProviderId: usageProviderId,
-        messageModelId: usageModelId,
-        messageUsage: historyUsage,
-        messageVariant: displayMeta?.variant,
-        messageTime: resolvedTime,
-        scroll: overflowLines > 0,
-        scrollDistance,
-        scrollDuration,
+        content: root.text,
+        role: root.role === 'user' ? 'user' : 'assistant',
+        messageAgent: rootResolved?.displayMeta?.agent,
+        messageModel: rootResolved?.displayMeta?.model,
+        messageProviderId: rootResolved?.usageProviderId,
+        messageModelId: rootResolved?.usageModelId,
+        messageUsage: rootResolved?.historyUsage,
+        messageVariant: rootResolved?.displayMeta?.variant,
+        messageTime: rootResolved?.resolvedTime,
+        scroll: false,
+        scrollDistance: 0,
+        scrollDuration: 0,
         html: '',
-        attachments: entry.attachments,
+        attachments: root.attachments,
         isWrite: false,
         isMessage: true,
-        isSubagentMessage,
-        isFinalAnswer: isAssistantEntry && entry.finish === 'stop',
-        messageId: entry.id,
+        isSubagentMessage: false,
+        isFinalAnswer: false,
+        isRound: true,
+        roundId: root.id,
+        roundMessages,
+        roundDiffs,
+        messageId: root.id,
         messageKey,
-        follow: isSubagentMessage ? true : undefined,
         sessionId,
-        zIndex: isSubagentMessage ? nextWindowZ() : undefined,
       });
-      if (entry.attachments.length > 0) {
-        messageAttachmentsById.set(messageKey, entry.attachments);
+      if (root.attachments.length > 0) {
+        messageAttachmentsById.set(messageKey, root.attachments);
       }
       messageIndexById.set(messageKey, queue.value.length - 1);
-      messageContentById.set(messageKey, entry.text);
-    });
-
-    // Attach summary.diffs from user messages to their corresponding final answer entries
-    if (!isSubagentMessage) {
-      const allMessages = data as Array<Record<string, unknown>>;
-      let lastUserSummaryDiffs: Array<MessageDiffEntry> | undefined;
-      for (const message of allMessages) {
-        const info = message.info as Record<string, unknown> | undefined;
-        const id = typeof info?.id === 'string' ? info.id : undefined;
-        const role = typeof info?.role === 'string' ? info.role : undefined;
-        const finish = typeof info?.finish === 'string' ? info.finish : undefined;
-        if (!id) continue;
-        if (role === 'user') {
-          lastUserSummaryDiffs = extractSummaryDiffs(info);
-        } else if (role === 'assistant' && finish === 'stop' && lastUserSummaryDiffs && lastUserSummaryDiffs.length > 0) {
-          const finalKey = buildMessageKey(id, sessionId);
-          messageDiffsByKey.set(finalKey, lastUserSummaryDiffs);
-          lastUserSummaryDiffs = undefined;
-        }
-      }
-      scheduleFollowScroll();
+      messageContentById.set(messageKey, root.text);
+      messageDiffsByKey.set(messageKey, roundDiffs);
     }
+
+    scheduleFollowScroll();
   } catch (error) {
     log('History load failed', error);
   }
