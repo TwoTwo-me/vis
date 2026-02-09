@@ -17,25 +17,19 @@ importers:
       '@xterm/xterm':
         specifier: ^6.0.0
         version: 6.0.0
+      shiki:
+        specifier: ^3.22.0
+        version: 3.22.0
+      vue:
+        specifier: ^3.5.27
+        version: 3.5.27(typescript@5.9.3)
     devDependencies:
-      '@hono/node-server':
-        specifier: ^1.19.9
-        version: 1.19.9(hono@4.11.7)
-      '@hono/vite-build':
-        specifier: ^1.9.2
-        version: 1.9.2(hono@4.11.7)
-      '@hono/vite-dev-server':
-        specifier: ^0.25.0
-        version: 0.25.0(hono@4.11.7)
       '@types/node':
         specifier: ^25.2.0
         version: 25.2.0
       '@vitejs/plugin-vue':
         specifier: ^6.0.4
         version: 6.0.4(vite@7.3.1(@types/node@25.2.0))(vue@3.5.27(typescript@5.9.3))
-      hono:
-        specifier: ^4.11.7
-        version: 4.11.7
       oxfmt:
         specifier: ^0.28.0
         version: 0.28.0
@@ -45,18 +39,9 @@ importers:
       oxlint-tsgolint:
         specifier: ^0.11.4
         version: 0.11.4
-      shiki:
-        specifier: ^3.22.0
-        version: 3.22.0
       vite:
         specifier: ^7.3.1
         version: 7.3.1(@types/node@25.2.0)
-      vite-plugin-externalize-deps:
-        specifier: ^0.10.0
-        version: 0.10.0(vite@7.3.1(@types/node@25.2.0))
-      vue:
-        specifier: ^3.5.27
-        version: 3.5.27(typescript@5.9.3)
       vue-tsc:
         specifier: ^3.2.4
         version: 3.2.4(typescript@5.9.3)
@@ -235,31 +220,6 @@ packages:
     engines: {node: '>=18'}
     cpu: [x64]
     os: [win32]
-
-  '@hono/node-server@1.19.9':
-    resolution: {integrity: sha512-vHL6w3ecZsky+8P5MD+eFfaGTyCeOHUIFYMGpQGbrBTSmNNoxv0if69rEZ5giu36weC5saFuznL411gRX7bJDw==}
-    engines: {node: '>=18.14.1'}
-    peerDependencies:
-      hono: ^4
-
-  '@hono/vite-build@1.9.2':
-    resolution: {integrity: sha512-7/qan3lgeA8mMv7jtx5KX0wrAdMteNqI87JcZjS1CUN9hhIsaqOvySXcT3lZLyhYidywl+s88ZX84I0knefItA==}
-    engines: {node: '>=18.14.1'}
-    peerDependencies:
-      hono: '*'
-
-  '@hono/vite-dev-server@0.25.0':
-    resolution: {integrity: sha512-4j5rs7yUTOObU2/yCEHeWbf3C8m95SD9lhdUUE6CJ462Emp9vS94yiza2dsA8+ly5pdaIQW0cd4nhNVcwYL5tA==}
-    engines: {node: '>=18.14.1'}
-    peerDependencies:
-      hono: '*'
-      miniflare: '*'
-      wrangler: '*'
-    peerDependenciesMeta:
-      miniflare:
-        optional: true
-      wrangler:
-        optional: true
 
   '@jridgewell/sourcemap-codec@1.5.5':
     resolution: {integrity: sha512-cYQ9310grqxueWbl+WuIUIaiUaDcj7WOq5fVhEljNVgRfOUhY9fy2zTvfoqWsnebh8Sl70VScFbICvJnLKB0Og==}
@@ -624,12 +584,6 @@ packages:
   alien-signals@3.1.2:
     resolution: {integrity: sha512-d9dYqZTS90WLiU0I5c6DHj/HcKkF8ZyGN3G5x8wSbslulz70KOxaqCT0hQCo9KOyhVqzqGojvNdJXoTumZOtcw==}
 
-  balanced-match@1.0.2:
-    resolution: {integrity: sha512-3oSeUO0TMV67hN1AmbXsK4yaqU7tjiHlbxRDZOpH0KW9+CeX4bRAaX0Anxt0tx2MrpRpWwQaPwIlISEJhYU5Pw==}
-
-  brace-expansion@2.0.2:
-    resolution: {integrity: sha512-Jt0vHyM+jmUBqojB7E1NIYadt0vI0Qxjxd2TErW94wDz+E2LAm5vKMXXwg6ZZBTHPuUlDgQHKXvjGBdfcF1ZDQ==}
-
   ccount@2.0.1:
     resolution: {integrity: sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg==}
 
@@ -684,10 +638,6 @@ packages:
   hast-util-whitespace@3.0.0:
     resolution: {integrity: sha512-88JUN06ipLwsnv+dVn+OIYOvAuvBMy/Qoi6O7mQHxdPXpjy+Cd6xRkWwux7DKO+4sYILtLBRIKgsdpS2gQc7qw==}
 
-  hono@4.11.7:
-    resolution: {integrity: sha512-l7qMiNee7t82bH3SeyUCt9UF15EVmaBvsppY2zQtrbIhl/yzBTny+YUxsVjSjQ6gaqaeVtZmGocom8TzBlA4Yw==}
-    engines: {node: '>=16.9.0'}
-
   html-void-elements@3.0.0:
     resolution: {integrity: sha512-bEqo66MRXsUGxWHV5IP0PUiAWwoEjba4VCzg0LjFJBpchPaTfyfCKTG6bc5F8ucKec3q5y6qOdGyYTSBEvhCrg==}
 
@@ -711,10 +661,6 @@ packages:
 
   micromark-util-types@2.0.2:
     resolution: {integrity: sha512-Yw0ECSpJoViF1qTU4DC6NwtC4aWGt1EkzaQB8KPPyCRR8z9TWeV0HbEFGTO+ZY1wB22zmxnJqhPyTpOVCpeHTA==}
-
-  minimatch@9.0.5:
-    resolution: {integrity: sha512-G6T0ZX48xgozx7587koeX9Ys2NYy6Gmv//P89sEte9V9whIapMNF4idKxnW2QtCcLiTWlb/wfCabAtAFWhhBow==}
-    engines: {node: '>=16 || 14 >=14.17'}
 
   muggle-string@0.4.1:
     resolution: {integrity: sha512-VNTrAak/KhO2i8dqqnqnAHOa3cYBwXEZe9h+D5h/1ZqFSTEFHdM65lR7RoIqq3tBBYavsOXV84NoHXZ0AkPyqQ==}
@@ -832,11 +778,6 @@ packages:
 
   vfile@6.0.3:
     resolution: {integrity: sha512-KzIbH/9tXat2u30jf+smMwFCsno4wHVdNmzFyL+T/L3UGqqk6JKfVqOFOZEpZSHADH1k40ab6NUIXZq422ov3Q==}
-
-  vite-plugin-externalize-deps@0.10.0:
-    resolution: {integrity: sha512-eQrtpT/Do7AvDn76l1yL6ZHyXJ+UWH2LaHVqhAes9go54qaAnPZuMbgxcroQ/7WY3ZyetZzYW2quQnDF0DV5qg==}
-    peerDependencies:
-      vite: ^2.0.0 || ^3.0.0 || ^4.0.0 || ^5.0.0 || ^6.0.0 || ^7.0.0
 
   vite@7.3.1:
     resolution: {integrity: sha512-w+N7Hifpc3gRjZ63vYBXA56dvvRlNWRczTdmCBBa+CotUzAPf5b7YMdMR/8CQoeYE5LX3W4wj6RYTgonm1b9DA==}
@@ -990,20 +931,6 @@ snapshots:
 
   '@esbuild/win32-x64@0.27.2':
     optional: true
-
-  '@hono/node-server@1.19.9(hono@4.11.7)':
-    dependencies:
-      hono: 4.11.7
-
-  '@hono/vite-build@1.9.2(hono@4.11.7)':
-    dependencies:
-      hono: 4.11.7
-
-  '@hono/vite-dev-server@0.25.0(hono@4.11.7)':
-    dependencies:
-      '@hono/node-server': 1.19.9(hono@4.11.7)
-      hono: 4.11.7
-      minimatch: 9.0.5
 
   '@jridgewell/sourcemap-codec@1.5.5': {}
 
@@ -1293,12 +1220,6 @@ snapshots:
 
   alien-signals@3.1.2: {}
 
-  balanced-match@1.0.2: {}
-
-  brace-expansion@2.0.2:
-    dependencies:
-      balanced-match: 1.0.2
-
   ccount@2.0.1: {}
 
   character-entities-html4@2.1.0: {}
@@ -1373,8 +1294,6 @@ snapshots:
     dependencies:
       '@types/hast': 3.0.4
 
-  hono@4.11.7: {}
-
   html-void-elements@3.0.0: {}
 
   magic-string@0.30.21:
@@ -1409,10 +1328,6 @@ snapshots:
   micromark-util-symbol@2.0.1: {}
 
   micromark-util-types@2.0.2: {}
-
-  minimatch@9.0.5:
-    dependencies:
-      brace-expansion: 2.0.2
 
   muggle-string@0.4.1: {}
 
@@ -1580,10 +1495,6 @@ snapshots:
     dependencies:
       '@types/unist': 3.0.3
       vfile-message: 4.0.3
-
-  vite-plugin-externalize-deps@0.10.0(vite@7.3.1(@types/node@25.2.0)):
-    dependencies:
-      vite: 7.3.1(@types/node@25.2.0)
 
   vite@7.3.1(@types/node@25.2.0):
     dependencies:
