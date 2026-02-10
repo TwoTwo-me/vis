@@ -1,5 +1,5 @@
 <template>
-  <div class="message-viewer shiki-host">
+  <div class="message-viewer">
     <div v-if="state.html" class="message-content" v-html="state.html"></div>
     <div v-else-if="state.error" class="message-loading">{{ state.error }}</div>
   </div>
