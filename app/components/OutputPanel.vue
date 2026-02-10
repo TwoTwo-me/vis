@@ -897,45 +897,6 @@ defineExpose({ panelEl });
   background: rgba(30, 64, 175, 0.55);
 }
 
-.output-panel-shell .shiki-host {
-  color: inherit;
-  line-height: var(--message-line-height);
-}
-
-.output-panel-shell .shiki-host :deep(pre) {
-  color: inherit;
-  white-space: normal;
-}
-
-.output-panel-shell .shiki-host :deep(code) {
-  color: inherit;
-  white-space: normal;
-  line-height: 0 !important;
-}
-
-.output-panel-shell .shiki-host :deep(pre.shiki) {
-  line-height: 0 !important;
-}
-
-.output-panel-shell .shiki-host :deep(.line),
-.output-panel-shell .shiki-host :deep(.line)::before {
-  line-height: var(--message-line-height) !important;
-  color: inherit;
-}
-
-.output-panel-shell .shiki-host :deep(.line) {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.output-panel-shell .shiki-host.is-message :deep(pre.shiki) {
-  line-height: inherit !important;
-}
-
-.output-panel-shell .shiki-host.is-message :deep(code) {
-  line-height: inherit !important;
-}
-
 .output-entry-attachments {
   display: grid;
   grid-template-columns: repeat(auto-fill, minmax(120px, 1fr));
@@ -950,10 +911,6 @@ defineExpose({ panelEl });
   border: 1px solid #1e293b;
   object-fit: cover;
   background: #0b1320;
-}
-
-.output-panel-shell .shiki-host :deep(.line:empty)::after {
-  content: ' ';
 }
 
 .output-entry-inner.is-scrolling {
@@ -1027,54 +984,6 @@ defineExpose({ panelEl });
 
 .follow-button:hover {
   background: rgba(30, 41, 59, 0.98);
-}
-
-.shiki-host :deep(pre),
-.shiki-host :deep(code) {
-  margin: 0;
-  padding: 0;
-  background: transparent !important;
-  background-color: transparent !important;
-  line-height: inherit !important;
-  font-family: inherit;
-  font-size: inherit;
-}
-
-.shiki-host :deep(pre.shiki) {
-  background: transparent !important;
-  background-color: transparent !important;
-  color: inherit;
-  display: block;
-  line-height: inherit !important;
-}
-
-.shiki-host :deep(pre.shiki span) {
-  background-color: transparent !important;
-}
-
-.shiki-host :deep(.line),
-.shiki-host :deep(.line)::before {
-  line-height: inherit !important;
-}
-
-.shiki-host.is-message :deep(pre),
-.shiki-host.is-message :deep(code) {
-  white-space: pre-wrap;
-  word-break: break-word;
-}
-
-.shiki-host :deep(pre) {
-  counter-reset: shiki-line;
-}
-
-.shiki-host :deep(.line) {
-  display: block;
-  padding-left: 0;
-  position: relative;
-}
-
-.shiki-host.is-message :deep(.line)::before {
-  content: '';
 }
 
 /* === Nested Box Design === */
