@@ -7014,7 +7014,7 @@ function extractPatch(payload: unknown) {
       ? (part.state as Record<string, unknown>)
       : undefined;
   const status = typeof state?.status === 'string' ? state.status : undefined;
-  if (!status || status === 'pending') return null;
+  if (!status || status === 'pending' || status === 'running') return null;
 
   const input =
     state?.input && typeof state.input === 'object'
@@ -7024,25 +7024,35 @@ function extractPatch(payload: unknown) {
     state?.metadata && typeof state.metadata === 'object'
       ? (state.metadata as Record<string, unknown>)
       : undefined;
-  const output = state?.output ?? (state?.metadata as Record<string, unknown> | undefined)?.output;
-  const outputText = output !== undefined ? extractToolOutputText(output) : '';
-  const stateError = state?.error;
-  const errorText =
-    typeof stateError === 'string'
-      ? stateError
-      : stateError !== undefined
-        ? formatToolValue(stateError)
-        : '';
 
   const patchText = typeof input?.patchText === 'string' ? input.patchText : '';
   const parsedBlocks = patchText ? parsePatchTextBlocks(patchText) : [];
+  if (parsedBlocks.length === 0) return null;
 
-  if (status !== 'running') {
-    if (parsedBlocks.length === 0) return null;
-    const baseCallId = callId ?? 'apply_patch';
-    const entries = parsedBlocks.map((block, index) => ({
+  // Build a lookup from metadata.files[] to extract before/after content for syntax highlighting
+  const metadataFilesRaw = Array.isArray(metadata?.files) ? metadata.files : [];
+  const metadataFileRecords = metadataFilesRaw.map((item) => {
+    if (!item || typeof item !== 'object') return null;
+    const record = item as Record<string, unknown>;
+    const relativePath =
+      (typeof record.relativePath === 'string' && record.relativePath) ||
+      (typeof record.filePath === 'string' && record.filePath) ||
+      (typeof record.file === 'string' && record.file) ||
+      undefined;
+    const diff = typeof record.diff === 'string' ? record.diff : undefined;
+    const before = typeof record.before === 'string' ? record.before : undefined;
+    const after = typeof record.after === 'string' ? record.after : undefined;
+    return { relativePath, diff, before, after, record };
+  });
+
+  const baseCallId = callId ?? 'apply_patch';
+  const entries = parsedBlocks.map((block, index) => {
+    const mf = metadataFileRecords[index];
+    return {
       content: block.content,
       path: block.path,
+      code: mf?.before,
+      after: mf?.after,
       isWrite: true,
       callId: `${baseCallId}:${index}`,
       toolStatus: status,
@@ -7050,73 +7060,9 @@ function extractPatch(payload: unknown) {
       toolTitle: block.path,
       lang: guessLanguage(block.path),
       view: 'diff' as const,
-    }));
-    return entries;
-  }
-
-  const metadataFilesRaw = Array.isArray(metadata?.files) ? metadata.files : [];
-  const metadataBlocks = metadataFilesRaw
-    .map((item, index) => {
-      if (!item || typeof item !== 'object') return null;
-      const record = item as Record<string, unknown>;
-      const relativePath =
-        (typeof record.relativePath === 'string' && record.relativePath) ||
-        (typeof record.filePath === 'string' && record.filePath) ||
-        (typeof record.file === 'string' && record.file) ||
-        undefined;
-      const diff = typeof record.diff === 'string' ? record.diff : undefined;
-      if (diff && diff.trim()) {
-        return {
-          path: relativePath,
-          content: diff,
-          index,
-        };
-      }
-      const before = typeof record.before === 'string' ? record.before : undefined;
-      const after = typeof record.after === 'string' ? record.after : undefined;
-      if (before !== undefined || after !== undefined) {
-        const fileName = relativePath ?? (parsedBlocks[index]?.path || `patch-${index + 1}`);
-        return {
-          path: fileName,
-          content: buildUnifiedDiff(before ?? '', after ?? '', fileName, {
-            status: typeof record.type === 'string' ? record.type : undefined,
-            additions: typeof record.additions === 'number' ? record.additions : undefined,
-            deletions: typeof record.deletions === 'number' ? record.deletions : undefined,
-          }),
-          index,
-        };
-      }
-      return null;
-    })
-    .filter((entry): entry is { path?: string; content: string; index: number } => Boolean(entry));
-
-  const count = Math.max(parsedBlocks.length, metadataBlocks.length, status === 'error' ? 1 : 0);
-  if (count === 0) return null;
-  const baseCallId = callId ?? 'apply_patch';
-
-  const entries = Array.from({ length: count }, (_, index) => {
-    const parsedBlock = parsedBlocks[index];
-    const metadataBlock = metadataBlocks[index];
-    const path = metadataBlock?.path ?? parsedBlock?.path;
-    const content =
-      metadataBlock?.content ??
-      parsedBlock?.content ??
-      (status === 'error' ? errorText : outputText);
-    const fallbackTitle = path ?? `patch-${index + 1}`;
-    return {
-      content,
-      path: path ?? fallbackTitle,
-      isWrite: true,
-      callId: `${baseCallId}:${index}`,
-      toolStatus: status,
-      toolName: 'apply_patch',
-      toolTitle: path ?? fallbackTitle,
-      lang: guessLanguage(path),
-      view: 'diff' as const,
     };
-  }).filter((entry) => entry.content.trim().length > 0);
-
-  return entries.length > 0 ? entries : null;
+  });
+  return entries;
 }
 
 function extractFileRead(payload: unknown, eventType: string) {
@@ -7306,11 +7252,17 @@ function extractFileRead(payload: unknown, eventType: string) {
         };
       }
       case 'edit': {
+        if (status === 'running') return null;
         const diff = typeof metadata?.diff === 'string' ? metadata.diff : '';
         const editPath = resolveReadWritePath(input, metadata, state);
+        const filediff = metadata?.filediff && typeof metadata.filediff === 'object'
+          ? (metadata.filediff as Record<string, unknown>)
+          : undefined;
+        const editCode = typeof filediff?.before === 'string' ? filediff.before : undefined;
+        const editAfter = typeof filediff?.after === 'string' ? filediff.after : undefined;
         return {
           component: EditContent,
-          props: { input, output: outputText, error: errorText, status, metadata, toolName: tool, diff },
+          props: { input, output: outputText, error: errorText, status, metadata, toolName: tool, diff, code: editCode, after: editAfter },
           callId,
           toolName: tool,
           toolStatus: status,
@@ -7321,27 +7273,36 @@ function extractFileRead(payload: unknown, eventType: string) {
         if (status === 'running') return null;
         const editPathMulti = resolveReadWritePath(input, metadata, state);
         const results = Array.isArray(metadata?.results) ? metadata.results : [];
-        const diffs = results
+        const editEntries = results
           .map((item) => {
             if (!item || typeof item !== 'object') return null;
-            const diff = (item as Record<string, unknown>).diff;
-            return typeof diff === 'string' && diff.trim() ? diff : null;
+            const r = item as Record<string, unknown>;
+            const diff = r.diff;
+            if (typeof diff !== 'string' || !diff.trim()) return null;
+            const fd = r.filediff && typeof r.filediff === 'object'
+              ? (r.filediff as Record<string, unknown>)
+              : undefined;
+            return {
+              diff,
+              code: typeof fd?.before === 'string' ? fd.before : undefined,
+              after: typeof fd?.after === 'string' ? fd.after : undefined,
+            };
           })
-          .filter((item): item is string => Boolean(item));
-        if (diffs.length > 1) {
-          return diffs.map((diff, index) => ({
+          .filter((item): item is { diff: string; code: string | undefined; after: string | undefined } => Boolean(item));
+        if (editEntries.length > 1) {
+          return editEntries.map((entry, index) => ({
             component: EditContent,
-            props: { input, output: outputText, error: errorText, status, metadata, toolName: tool, diff, index, total: diffs.length },
+            props: { input, output: outputText, error: errorText, status, metadata, toolName: tool, diff: entry.diff, code: entry.code, after: entry.after, index, total: editEntries.length },
             callId: callId ? `${callId}:${index}` : undefined,
             toolName: tool,
             toolStatus: status,
-            title: toolPrefix('EDIT', editPathMulti ? `${editPathMulti} (${index + 1}/${diffs.length})` : `(${index + 1}/${diffs.length})`),
+            title: toolPrefix('EDIT', editPathMulti ? `${editPathMulti} (${index + 1}/${editEntries.length})` : `(${index + 1}/${editEntries.length})`),
           }));
         }
-        if (diffs.length === 1) {
+        if (editEntries.length === 1) {
           return {
             component: EditContent,
-            props: { input, output: outputText, error: errorText, status, metadata, toolName: tool, diff: diffs[0] },
+            props: { input, output: outputText, error: errorText, status, metadata, toolName: tool, diff: editEntries[0].diff, code: editEntries[0].code, after: editEntries[0].after },
             callId,
             toolName: tool,
             toolStatus: status,
@@ -9294,6 +9255,8 @@ function connect() {
             status: patchEvent.toolStatus,
             toolName: patchEvent.toolName,
             diff: patchEvent.content,
+            code: patchEvent.code,
+            after: patchEvent.after,
           },
           status: patchEvent.toolStatus,
           title: patchEvent.toolTitle ?? patchEvent.path ?? 'apply_patch',

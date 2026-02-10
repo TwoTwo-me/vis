@@ -12,6 +12,8 @@ const props = defineProps<{
   metadata?: Record<string, unknown>;
   toolName?: string;
   diff?: string;
+  code?: string;
+  after?: string;
   index?: number;
   total?: number;
 }>();
@@ -39,9 +41,13 @@ const { html: renderedHtml } = useCodeRender(() => {
   const content = displayContent.value;
   if (!content) return { code: '', lang: 'text', theme: 'github-dark', gutterMode: 'none' as const };
   if (isDiff.value) {
-    // Use patch-based rendering for proper colorized diff
+    // Use patch-based rendering for proper colorized diff.
+    // When before (code) and after are available, Shiki can apply full
+    // language-aware syntax highlighting instead of falling back to
+    // reconstructed stubs that lose context (e.g. Vue <script> blocks).
     return {
-      code: '',
+      code: props.code ?? '',
+      after: props.after,
       patch: content,
       lang: lang.value,
       theme: 'github-dark',
