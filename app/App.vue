@@ -2980,8 +2980,8 @@ async function bootstrapSelections() {
   }
 }
 
-async function fetchProviders() {
-  if (providersLoading.value || providersLoaded.value) return;
+async function fetchProviders(force = false) {
+  if (providersLoading.value || (!force && providersLoaded.value)) return;
   providersLoading.value = true;
   providersFetchCount.value += 1;
   log('providers fetch start', providersFetchCount.value);
@@ -6301,7 +6301,7 @@ async function renderReadHtmlFromApi(params: {
          lineLimit: params.lineLimit,
        });
      }
-     return renderText('File content unavailable');
+     return renderText(`Failed to load: ${params.path ?? 'unknown file'}`);
    }
 }
 
@@ -10309,6 +10309,7 @@ async function reconnectAndReconcile() {
   try {
     await connect({ failFast: true, timeoutMs: 5000 });
     await reconcileSessionGraphFromScopes();
+    await fetchProviders(true);
     connectionState.value = 'ready';
     reconnectingMessage.value = '';
     sendStatus.value = 'Ready';
