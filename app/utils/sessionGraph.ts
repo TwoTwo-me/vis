@@ -58,8 +58,8 @@ function sortByUpdatedDesc(a: SessionNode, b: SessionNode) {
 export function createSessionGraphStore() {
   const nodesByKey = new Map<string, SessionNode>();
   const keysBySessionID = new Map<string, Set<string>>();
-  const directoriesByProjectID = new Map<string, Set<string>>();
-  const projectIDsByDirectory = new Map<string, Set<string>>();
+  const directoryByProjectID = new Map<string, string>();
+  const projectIDByDirectory = new Map<string, string>();
   const statusByKey = new Map<string, SessionStatusType>();
   let version = 0;
 
@@ -76,8 +76,8 @@ export function createSessionGraphStore() {
     keySet.add(node.key);
 
     const normalizedDirectory = normalizeDirectory(node.directory);
-    if (normalizedDirectory) {
-      rememberProjectDirectory(node.projectID, normalizedDirectory);
+    if (normalizedDirectory && node.projectID) {
+      setProjectDirectory(node.projectID, normalizedDirectory);
     }
   }
 
@@ -90,40 +90,29 @@ export function createSessionGraphStore() {
     statusByKey.delete(node.key);
   }
 
-  function rememberProjectDirectory(projectID: string, directory: string) {
-    const normalizedDirectory = normalizeDirectory(directory);
-    if (!projectID || !normalizedDirectory) return;
-    const byProject = directoriesByProjectID.get(projectID) ?? new Set<string>();
-    const byDirectory = projectIDsByDirectory.get(normalizedDirectory) ?? new Set<string>();
-    const beforeProjectSize = byProject.size;
-    const beforeDirectorySize = byDirectory.size;
-    byProject.add(normalizedDirectory);
-    byDirectory.add(projectID);
-    directoriesByProjectID.set(projectID, byProject);
-    projectIDsByDirectory.set(normalizedDirectory, byDirectory);
-    if (byProject.size !== beforeProjectSize || byDirectory.size !== beforeDirectorySize) bump();
-  }
-
-  function rememberProjectDirectories(projectID: string, directories: string[]) {
-    directories.forEach((directory) => rememberProjectDirectory(projectID, directory));
+  function setProjectDirectory(projectID: string, directory: string) {
+    const norm = normalizeDirectory(directory);
+    if (!projectID || !norm) return;
+    const existing = projectIDByDirectory.get(norm);
+    if (existing === projectID) return; // no change
+    // Cleanup old mappings
+    if (existing) {
+      const oldDir = directoryByProjectID.get(existing);
+      if (oldDir === norm) directoryByProjectID.delete(existing);
+    }
+    const oldDir = directoryByProjectID.get(projectID);
+    if (oldDir && oldDir !== norm) {
+      projectIDByDirectory.delete(oldDir);
+    }
+    projectIDByDirectory.set(norm, projectID);
+    directoryByProjectID.set(projectID, norm);
+    bump();
   }
 
   function resolveProjectIDForDirectory(directory?: string) {
-    const normalizedDirectory = normalizeDirectory(directory);
-    if (!normalizedDirectory) return '';
-    const candidates = projectIDsByDirectory.get(normalizedDirectory);
-    if (!candidates || candidates.size === 0) return '';
-    if (candidates.size === 1) return Array.from(candidates)[0] ?? '';
-    let winner = '';
-    let winnerCount = -1;
-    candidates.forEach((projectID) => {
-      const count = Array.from(nodesByKey.values()).filter((node) => node.projectID === projectID).length;
-      if (count > winnerCount) {
-        winner = projectID;
-        winnerCount = count;
-      }
-    });
-    return winner || Array.from(candidates)[0] || '';
+    const norm = normalizeDirectory(directory);
+    if (!norm) return '';
+    return projectIDByDirectory.get(norm) ?? '';
   }
 
   function resolveNodeKey(sessionID: string, projectID?: string) {
@@ -315,7 +304,8 @@ export function createSessionGraphStore() {
   }
 
   function getDirectoriesForProject(projectID: string) {
-    return Array.from(directoriesByProjectID.get(projectID) ?? []);
+    const dir = directoryByProjectID.get(projectID);
+    return dir ? [dir] : [];
   }
 
   function listActiveSessionKeys(projectID?: string) {
@@ -369,10 +359,63 @@ export function createSessionGraphStore() {
     return new Set(keysBySessionID.keys());
   }
 
+  function dump() {
+    const nodes: Array<{
+      key: string;
+      sessionID: string;
+      projectID: string;
+      parentID?: string;
+      title?: string;
+      slug?: string;
+      directory?: string;
+      retention: string;
+      status: string;
+      timeCreated?: number;
+      timeUpdated?: number;
+      lastSeenAt: number;
+      lastActiveAt?: number;
+    }> = [];
+    nodesByKey.forEach((node, key) => {
+      nodes.push({
+        key,
+        sessionID: node.sessionID,
+        projectID: node.projectID,
+        parentID: node.parentID,
+        title: node.title,
+        slug: node.slug,
+        directory: node.directory,
+        retention: node.retention,
+        status: statusByKey.get(key) ?? 'unknown',
+        timeCreated: node.timeCreated,
+        timeUpdated: node.timeUpdated,
+        lastSeenAt: node.lastSeenAt,
+        lastActiveAt: node.lastActiveAt,
+      });
+    });
+
+    const directories: Record<string, string> = {};
+    directoryByProjectID.forEach((dir, projectID) => {
+      directories[projectID] = dir;
+    });
+
+    const projectsByDir: Record<string, string> = {};
+    projectIDByDirectory.forEach((projectID, dir) => {
+      projectsByDir[dir] = projectID;
+    });
+
+    return {
+      version,
+      nodeCount: nodesByKey.size,
+      sessionCount: keysBySessionID.size,
+      nodes,
+      directoryByProjectID: directories,
+      projectIDByDirectory: projectsByDir,
+    };
+  }
+
   return {
     getVersion: () => version,
-    rememberProjectDirectory,
-    rememberProjectDirectories,
+    setProjectDirectory,
     resolveProjectIDForDirectory,
     getDirectoriesForProject,
     upsertSession,
@@ -388,5 +431,6 @@ export function createSessionGraphStore() {
     listActiveSessions,
     pruneEphemeralChildren,
     getKnownSessionIDs,
+    dump,
   };
 }
