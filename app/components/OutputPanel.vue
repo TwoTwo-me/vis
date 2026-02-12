@@ -4,7 +4,8 @@
       <div
         ref="panelEl"
         class="output-panel-scroll"
-        @scroll="$emit('scroll')"
+        :class="{ 'is-initial-loading': initialRenderTrackingActive }"
+        @scroll="handleScroll"
         @wheel="$emit('wheel', $event)"
         @touchmove="$emit('touchmove')"
       >
@@ -14,7 +15,7 @@
             :key="q.messageKey ?? q.roundId ?? q.messageId ?? q.time"
           >
             <!-- ===== Round: nested box layout ===== -->
-            <div v-if="q.isRound" class="info-block">
+            <div v-if="q.isRound" v-show="isEntryRendered(q)" class="info-block">
               <!-- Fork button (top-right) -->
               <button
                 v-if="q.roundId && q.sessionId"
@@ -39,7 +40,7 @@
                           :code="msg.content"
                           :lang="'markdown'"
                           :theme="theme"
-                          @rendered="handleMessageRendered"
+                          @rendered="handleMessageRendered(getRoundUserRenderKey(q, msg, mi))"
                         />
                         <div
                           v-if="msg.attachments && msg.attachments.length > 0"
@@ -84,7 +85,7 @@
                             :code="group.messages[group.messages.length - 1]?.content ?? ''"
                             :lang="'markdown'"
                             :theme="theme"
-                            @rendered="handleMessageRendered"
+                            @rendered="handleMessageRendered(getRoundAssistantRenderKey(q, group))"
                           />
                         </div>
                         <button
@@ -135,6 +136,7 @@
             <!-- ===== Non-round fallback ===== -->
             <div
               v-else
+              v-show="isEntryRendered(q)"
               class="output-entry"
               :class="{ 'is-user': q.role === 'user' }"
               :style="getEntryStyle(q)"
@@ -158,7 +160,7 @@
                   :code="q.content"
                   :lang="'markdown'"
                   :theme="theme"
-                  @rendered="handleMessageRendered"
+                  @rendered="handleMessageRendered(getEntryRenderKey(q))"
                 />
                 <div
                   v-if="q.attachments && q.attachments.length > 0"
@@ -251,7 +253,7 @@
 </template>
 
 <script setup lang="ts">
-import { Transition, computed, onBeforeUnmount, onMounted, ref, watch } from 'vue';
+import { Transition, computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue';
 import MessageViewer from './MessageViewer.vue';
 type FileReadEntry = {
   time: number;
@@ -359,6 +361,9 @@ const emit = defineEmits<{
   ): void;
   (event: 'show-message-history', payload: { roundId: string; contents: string[] }): void;
   (event: 'open-image', payload: { url: string; filename: string }): void;
+  (event: 'message-rendered'): void;
+  (event: 'content-resized'): void;
+  (event: 'initial-render-complete'): void;
 }>();
 
 const filteredQueue = computed(() =>
@@ -552,12 +557,14 @@ function hasRoundFooterActions(entry: FileReadEntry): boolean {
 
 const panelEl = ref<HTMLDivElement | null>(null);
 const contentEl = ref<HTMLDivElement | null>(null);
+const pendingInitialRenderKeys = ref(new Set<string>());
+const initialRenderTrackingActive = ref(false);
+const renderedKeys = ref(new Set<string>());
 const thinkingFrames = ['', '.', '..', '...'];
 const thinkingIndex = ref(0);
 const thinkingSuffix = ref('');
 let thinkingTimer: number | undefined;
 let contentResizeObserver: ResizeObserver | undefined;
-let followResizeFrame: number | undefined;
 
 const thinkingDisplayText = computed(() => {
   if (!props.isThinking) return '🟢 Idle';
@@ -567,21 +574,82 @@ const thinkingDisplayText = computed(() => {
   return `${heads} Thinking${thinkingSuffix.value}`;
 });
 
-function scheduleFollowScrollIfNeeded() {
-  if (!props.isFollowing) return;
-  if (followResizeFrame !== undefined) {
-    cancelAnimationFrame(followResizeFrame);
-  }
-  followResizeFrame = requestAnimationFrame(() => {
-    followResizeFrame = undefined;
-    const panel = panelEl.value;
-    if (!panel) return;
-    panel.scrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
-  });
+function getEntryRenderKey(entry: FileReadEntry): string {
+  return `entry:${entry.messageKey ?? entry.messageId ?? entry.time}`;
 }
 
-function handleMessageRendered() {
-  scheduleFollowScrollIfNeeded();
+function getRoundUserRenderKey(entry: FileReadEntry, msg: RoundMessage, index: number): string {
+  const roundKey = entry.roundId ?? entry.messageId ?? entry.messageKey ?? entry.time;
+  return `round-user:${roundKey}:${msg.messageId ?? index}`;
+}
+
+function getRoundAssistantRenderKey(entry: FileReadEntry, group: MessageGroup): string {
+  const roundKey = entry.roundId ?? entry.messageId ?? entry.messageKey ?? entry.time;
+  return `round-assistant:${roundKey}:${getGroupTransitionKey(group)}`;
+}
+
+function isEntryRendered(entry: FileReadEntry): boolean {
+  if (entry.isRound) {
+    const groups = groupRoundMessages(entry);
+    return groups.every((group) => {
+      if (group.role === 'user') {
+        return group.messages.every((msg, index) =>
+          renderedKeys.value.has(getRoundUserRenderKey(entry, msg, index)),
+        );
+      }
+      if (group.role === 'assistant') {
+        return renderedKeys.value.has(getRoundAssistantRenderKey(entry, group));
+      }
+      return true;
+    });
+  }
+  return renderedKeys.value.has(getEntryRenderKey(entry));
+}
+
+function collectInitialRenderKeys(): Set<string> {
+  const keys = new Set<string>();
+  filteredQueue.value.forEach((entry) => {
+    if (entry.isRound) {
+      const groups = groupRoundMessages(entry);
+      groups.forEach((group) => {
+        if (group.role === 'user') {
+          group.messages.forEach((msg, index) => {
+            keys.add(getRoundUserRenderKey(entry, msg, index));
+          });
+          return;
+        }
+        if (group.role === 'assistant') {
+          keys.add(getRoundAssistantRenderKey(entry, group));
+        }
+      });
+      return;
+    }
+    keys.add(getEntryRenderKey(entry));
+  });
+  return keys;
+}
+
+function beginInitialRenderTracking() {
+  const keys = collectInitialRenderKeys();
+  pendingInitialRenderKeys.value = keys;
+  initialRenderTrackingActive.value = keys.size > 0;
+  if (keys.size === 0) emit('initial-render-complete');
+}
+
+function handleScroll() {
+  initialRenderTrackingActive.value = false;
+  emit('scroll');
+}
+
+function handleMessageRendered(renderKey: string) {
+  renderedKeys.value.add(renderKey);
+  emit('message-rendered');
+  if (!initialRenderTrackingActive.value) return;
+  const keys = pendingInitialRenderKeys.value;
+  keys.delete(renderKey);
+  if (keys.size > 0) return;
+  initialRenderTrackingActive.value = false;
+  emit('initial-render-complete');
 }
 
 function setupContentResizeObserver() {
@@ -591,7 +659,7 @@ function setupContentResizeObserver() {
   const target = contentEl.value;
   if (!target) return;
   contentResizeObserver = new ResizeObserver(() => {
-    scheduleFollowScrollIfNeeded();
+    emit('content-resized');
   });
   contentResizeObserver.observe(target);
 }
@@ -734,15 +802,28 @@ watch(contentEl, () => {
   setupContentResizeObserver();
 });
 
+watch(
+  () => filteredQueue.value.length,
+  (length, previous) => {
+    if (length === 0) {
+      pendingInitialRenderKeys.value = new Set<string>();
+      initialRenderTrackingActive.value = false;
+      renderedKeys.value = new Set<string>();
+      return;
+    }
+    if (previous === 0) beginInitialRenderTracking();
+  },
+);
+
 onMounted(() => {
   setupContentResizeObserver();
+  nextTick(() => {
+    beginInitialRenderTracking();
+    emit('content-resized');
+  });
 });
 
 onBeforeUnmount(() => {
-  if (followResizeFrame !== undefined) {
-    cancelAnimationFrame(followResizeFrame);
-    followResizeFrame = undefined;
-  }
   contentResizeObserver?.disconnect();
   contentResizeObserver = undefined;
   if (thinkingTimer !== undefined) window.clearInterval(thinkingTimer);
@@ -787,6 +868,10 @@ defineExpose({ panelEl });
   overflow-y: auto;
   overscroll-behavior: contain;
   scrollbar-gutter: stable;
+}
+
+.output-panel-scroll.is-initial-loading {
+  visibility: hidden;
 }
 
 .output-panel-content {

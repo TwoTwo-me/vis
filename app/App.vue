@@ -2,13 +2,11 @@
   <div ref="appEl" class="app">
     <template v-if="uiInitState === 'ready'">
       <header class="app-header">
-         <TopPanel
-           :project-directories="baseWorktreeOptions"
-           :project-directory="projectDirectory"
-           :active-directories="worktrees"
-           :active-directory="activeDirectory"
-           :active-directory-meta="worktreeMetaByDir"
-           :sessions="filteredSessions"
+          <TopPanel
+            :project-directories="baseWorktreeOptions"
+            :active-directories="worktrees"
+            :active-directory-meta="worktreeMetaByDir"
+            :sessions="filteredSessions"
            :session-status-by-id="sessionStatusByIdRecord"
            :home-path="homePath"
            v-model:project-directory="projectDirectory"
@@ -38,15 +36,14 @@
                 :theme="shikiTheme"
                 :resolve-agent-color="resolveAgentColorForName"
                 :message-diffs="messageDiffsByKey"
-                @scroll="handleOutputPanelScroll"
-                @wheel="handleOutputPanelWheel"
-                @touchmove="handleOutputPanelScroll"
-                @resume-follow="resumeFollow"
+                @resume-follow="handleOutputPanelResumeFollow"
                 @fork-message="handleForkMessage"
                 @revert-message="handleRevertMessage"
                 @show-message-diff="handleShowMessageDiff"
                 @show-message-history="handleShowMessageHistory"
                 @open-image="handleOpenImage"
+                @content-resized="scheduleFollowScroll"
+                @initial-render-complete="handleOutputPanelInitialRenderComplete"
               />
               <SidePanel
                 class="todo-panel"
@@ -89,6 +86,7 @@
       >
         <div class="input-resizer" @pointerdown="startInputResize"></div>
         <InputPanel
+          ref="inputPanelRef"
           :can-send="canSend"
           :agent-options="agentOptions"
           :has-agent-options="hasAgentOptions"
@@ -180,7 +178,7 @@ import {
   formatQueryToolTitle,
   toolColor,
 } from './components/ToolWindow/utils';
-import { useOutputPanelFollow } from './composables/useOutputPanelFollow';
+import { useScrollFollow, type ScrollMode } from './composables/useScrollFollow';
 import { useFloatingWindows } from './composables/useFloatingWindows';
 import { renderWorkerHtml } from './utils/workerRenderer';
 import * as opencodeApi from './utils/opencode';
@@ -455,31 +453,66 @@ const outputEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLElement | null>(null);
 const toolWindowCanvasEl = ref<HTMLDivElement | null>(null);
 const outputPanelRef = ref<{ panelEl: HTMLDivElement | null } | null>(null);
-const isFollowing = ref(true);
+const inputPanelRef = ref<{ focus: () => void } | null>(null);
+const outputPanelContainerEl = computed(() => outputPanelRef.value?.panelEl ?? undefined);
+const outputPanelScrollMode = computed<ScrollMode>(() => 'follow');
 const {
-  scrollToBottom,
-  updateFollowState,
-  handleOutputPanelScroll,
-  handleOutputPanelWheel,
-  scheduleFollowScroll,
-  resumeFollow,
-} = useOutputPanelFollow({
-  outputPanelRef,
+  isTrackingPaused: isOutputPanelTrackingPaused,
   isFollowing,
-  followThresholdPx: FOLLOW_THRESHOLD_PX,
+  pauseTracking: pauseOutputPanelTracking,
+  resumeTracking: resumeOutputPanelTracking,
+  runWithoutTracking: runWithoutOutputPanelTracking,
+  resumeFollow,
+  scrollToBottom: scrollOutputPanelToBottom,
+} = useScrollFollow(outputPanelContainerEl, outputPanelScrollMode, {
+  bottomThresholdPx: FOLLOW_THRESHOLD_PX,
+  observeDelayMs: 0,
+  smoothEngine: 'native',
+  smoothOnMutation: false,
+  smoothOnInitialFollow: false,
 });
 
-function forceFollowScroll() {
-  isFollowing.value = true;
+const outputPanelInitialFollowPending = ref(true);
+pauseOutputPanelTracking();
+
+function scheduleFollowScroll() {
+  if (isOutputPanelTrackingPaused.value) return;
+  if (!isFollowing.value) return;
   nextTick(() => {
-    scrollToBottom();
-    updateFollowState();
+    if (isOutputPanelTrackingPaused.value) return;
+    if (!isFollowing.value) return;
+    scrollOutputPanelToBottom(false);
+  });
+}
+
+function handleOutputPanelInitialRenderComplete() {
+  if (!outputPanelInitialFollowPending.value) return;
+  outputPanelInitialFollowPending.value = false;
+  runWithoutOutputPanelTracking(() => {
+    resumeFollow(false);
+  });
+  nextTick(() => {
+    runWithoutOutputPanelTracking(() => {
+      scrollOutputPanelToBottom(false);
+    });
     requestAnimationFrame(() => {
-      scrollToBottom();
-      updateFollowState();
+      runWithoutOutputPanelTracking(() => {
+        scrollOutputPanelToBottom(false);
+      });
+      requestAnimationFrame(() => {
+        runWithoutOutputPanelTracking(() => {
+          scrollOutputPanelToBottom(false);
+        });
+        resumeOutputPanelTracking({ syncToBottom: true });
+      });
     });
   });
 }
+
+function handleOutputPanelResumeFollow() {
+  resumeFollow();
+}
+
 const runningToolIds = reactive(new Set<string>());
 const subagentSessionExpiry = new Map<string, number>();
 const messageSummaryTitleById = new Map<string, string>();
@@ -2399,10 +2432,10 @@ function scheduleToolScrollAnimation(toolKey: string) {
 function syncVisibleSessionsFromGraph() {
   const directory = activeDirectory.value.trim();
   const projectID =
-    resolveProjectIdForDirectorySelection(directory || undefined)
-    || selectedProjectId.value
+    selectedProjectId.value
+    || resolveProjectIdForDirectorySelection(directory || undefined)
     || sessionGraphStore.resolveProjectIDForDirectory(directory);
-  if (projectID && selectedProjectId.value !== projectID) selectedProjectId.value = projectID;
+  if (!selectedProjectId.value && projectID) selectedProjectId.value = projectID;
   sessions.value = sessionGraphStore.getRootSessions({
     projectID: projectID || undefined,
     directory: directory || undefined,
@@ -2416,6 +2449,9 @@ function registerProjectDirectories() {
   projects.value.forEach((project) => {
     const dir = project.worktree?.trim();
     if (dir) sessionGraphStore.setProjectDirectory(project.id, dir);
+    projectSessionDirectories(project).forEach((candidate) => {
+      sessionGraphStore.addDirectoryCandidate(candidate, project.id);
+    });
   });
 }
 
@@ -2425,16 +2461,27 @@ function resolveProjectIdForDirectorySelection(directory?: string) {
   return sessionGraphStore.resolveProjectIDForDirectory(normalized);
 }
 
+function resolveProjectDirectoryForProjectId(projectId?: string) {
+  const normalized = projectId?.trim() || '';
+  if (!normalized) return '';
+  const fromGraph = sessionGraphStore.getDirectoriesForProject(normalized)[0] ?? '';
+  if (fromGraph) return fromGraph;
+  const fromProjects = projects.value.find((project) => project.id === normalized)?.worktree?.trim() ?? '';
+  return fromProjects;
+}
+
 function setSessions(list: SessionInfo[], directoryContext?: string) {
   const next = Array.isArray(list) ? list : [];
   const contextDirectory = (directoryContext ?? activeDirectory.value ?? '').trim();
+  next.forEach((session) => {
+    if (session.projectID && session.directory) {
+      sessionGraphStore.addDirectoryCandidate(session.directory, session.projectID);
+    }
+  });
   const projectID =
-    resolveProjectIdForDirectorySelection(contextDirectory || undefined)
-    || selectedProjectId.value
+    selectedProjectId.value
+    || resolveProjectIdForDirectorySelection(contextDirectory || undefined)
     || sessionGraphStore.resolveProjectIDForDirectory(contextDirectory);
-   if (projectID && contextDirectory) {
-     sessionGraphStore.setProjectDirectory(projectID, contextDirectory);
-   }
   sessionGraphStore.upsertSessions(next, {
     projectIDHint: projectID || undefined,
     directoryHint: contextDirectory || undefined,
@@ -2542,8 +2589,11 @@ function upsertProject(next: ProjectInfo) {
   } else {
     projects.value.unshift(next);
   }
-   const dir = next.worktree?.trim();
-   if (dir) sessionGraphStore.setProjectDirectory(next.id, dir);
+  const dir = next.worktree?.trim();
+  if (dir) sessionGraphStore.setProjectDirectory(next.id, dir);
+  projectSessionDirectories(next).forEach((candidate) => {
+    sessionGraphStore.addDirectoryCandidate(candidate, next.id);
+  });
 }
 
 async function fetchCurrentProject(directory?: string) {
@@ -2913,7 +2963,7 @@ async function bootstrapSessionGraph(directories: string[]) {
       });
       roots.forEach((session) => {
         if (session.projectID && session.directory) {
-          sessionGraphStore.setProjectDirectory(session.projectID, session.directory);
+          sessionGraphStore.addDirectoryCandidate(session.directory, session.projectID);
         }
       });
       const statusMap = (await opencodeApi.getSessionStatusMap(OPENCODE_BASE_URL, undefined, {
@@ -2943,25 +2993,35 @@ function finalizeSelectionAfterBootstrap() {
   const initialSessionId = initialQuery.sessionId.trim();
   if (initialProjectId && initialSessionId) {
     const initialSession = sessionGraphStore.getSession(initialSessionId, initialProjectId);
+    const rootDirectory = resolveProjectDirectoryForProjectId(initialProjectId);
+    if (rootDirectory) projectDirectory.value = rootDirectory;
+    selectedProjectId.value = initialProjectId;
     if (initialSession) {
       const targetDirectory = initialSession.directory?.trim();
       if (targetDirectory) {
-        projectDirectory.value = targetDirectory;
         activeDirectory.value = targetDirectory;
+      } else if (rootDirectory) {
+        activeDirectory.value = rootDirectory;
       }
-      selectedProjectId.value = initialProjectId;
       selectedSessionId.value = initialSessionId;
+      syncVisibleSessionsFromGraph();
+      return;
+    }
+    if (rootDirectory) {
+      activeDirectory.value = rootDirectory;
       syncVisibleSessionsFromGraph();
       return;
     }
   }
 
-  const defaultDirectory =
-    activeDirectory.value || collectProjectWorktreeDirectories()[0] || '';
-  if (defaultDirectory) {
-    projectDirectory.value = defaultDirectory;
-    activeDirectory.value = defaultDirectory;
-    const projectID = resolveProjectIdForDirectorySelection(defaultDirectory);
+  const defaultRootDirectory = projectDirectory.value || baseWorktreeOptions.value[0] || '';
+  if (defaultRootDirectory) {
+    projectDirectory.value = defaultRootDirectory;
+    if (!activeDirectory.value) activeDirectory.value = defaultRootDirectory;
+    const projectID =
+      selectedProjectId.value
+      || resolveProjectIdForDirectorySelection(activeDirectory.value || undefined)
+      || resolveProjectIdForDirectorySelection(defaultRootDirectory);
     if (projectID) selectedProjectId.value = projectID;
   }
 
@@ -4066,8 +4126,6 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
     }
 
     if (!isSubagentMessage) {
-      forceFollowScroll();
-    } else {
       scheduleFollowScroll();
     }
   } catch (error) {
@@ -5686,17 +5744,18 @@ function formatSessionGraphDump(): string {
     lines.push('');
   }
 
-   // Directory ↔ Project (1:1 mapping)
-   const dirs = Object.keys(data.projectIDByDirectory).sort();
-   if (dirs.length > 0) {
-     lines.push('DIRECTORY ↔ PROJECT (1:1)');
-     lines.push('');
-     for (const dir of dirs) {
-       const projectID = data.projectIDByDirectory[dir];
-       lines.push(`  ${dir} → ${projectID}`);
-     }
-     lines.push('');
-   }
+  // Directory -> Project candidates
+  const dirs = Object.keys(data.projectIDsByDirectory).sort();
+  if (dirs.length > 0) {
+    lines.push('DIRECTORY -> PROJECT CANDIDATES');
+    lines.push('');
+    for (const dir of dirs) {
+      const projectIDs = data.projectIDsByDirectory[dir] ?? [];
+      const marker = projectIDs.length === 1 ? '' : '  [ambiguous]';
+      lines.push(`  ${dir} → ${projectIDs.join(', ')}${marker}`);
+    }
+    lines.push('');
+  }
 
   return lines.join('\n');
 }
@@ -5980,11 +6039,13 @@ watch(
     if (directory === previous) return;
     if (typeof previous === 'undefined') return;
     if (isBootstrapping.value) return;
-    activeDirectory.value = '';
     selectedSessionId.value = '';
     worktrees.value = [];
-    const resolvedProjectId = resolveProjectIdForDirectorySelection(directory || undefined);
-    selectedProjectId.value = resolvedProjectId || '';
+    const currentSelected = selectedProjectId.value;
+    const currentRoot = resolveProjectDirectoryForProjectId(currentSelected);
+    if (!currentSelected || (currentRoot && normalizeDirectory(currentRoot) !== normalizeDirectory(directory || ''))) {
+      selectedProjectId.value = '';
+    }
     if (!selectedProjectId.value && directory) {
       void fetchCurrentProject(directory).then((project) => {
         if (!project?.id) return;
@@ -6019,8 +6080,10 @@ watch(
     if (typeof previous === 'undefined') return;
     if (isBootstrapping.value) return;
     selectedSessionId.value = '';
-    const resolvedProjectId = resolveProjectIdForDirectorySelection(value || undefined);
-    selectedProjectId.value = resolvedProjectId || '';
+    if (!selectedProjectId.value && value) {
+      const resolvedProjectId = resolveProjectIdForDirectorySelection(value || undefined);
+      selectedProjectId.value = resolvedProjectId || '';
+    }
     if (!selectedProjectId.value && value) {
       void fetchCurrentProject(value).then((project) => {
         if (!project?.id) return;
@@ -6044,6 +6107,10 @@ watch(
   selectedProjectId,
   () => {
     if (isBootstrapping.value) return;
+    const rootDirectory = resolveProjectDirectoryForProjectId(selectedProjectId.value || undefined);
+    if (rootDirectory && normalizeDirectory(projectDirectory.value) !== normalizeDirectory(rootDirectory)) {
+      projectDirectory.value = rootDirectory;
+    }
     syncVisibleSessionsFromGraph();
   },
   { immediate: true },
@@ -6075,8 +6142,8 @@ watch(
   (state) => {
     if (state !== 'ready') return;
     nextTick(() => {
-      forceFollowScroll();
       syncFloatingExtent();
+      inputPanelRef.value?.focus();
     });
   },
   { immediate: true },
@@ -6086,6 +6153,8 @@ async function reloadSelectedSessionState() {
   if (selectedSessionId.value && isBootstrapping.value && !activeDirectory.value) {
     return;
   }
+  outputPanelInitialFollowPending.value = true;
+  pauseOutputPanelTracking();
   const selected = sessions.value.find((session) => session.id === selectedSessionId.value);
   if (selected?.projectID) selectedProjectId.value = selected.projectID;
   disposeShellWindows({ preserve: true });
@@ -6120,6 +6189,7 @@ async function reloadSelectedSessionState() {
     // will automatically re-trigger reloadTodosForAllowedSessions.
     void fetchSessionChildren(selectedSessionId.value, directory, selectedProjectId.value || undefined);
   }
+  nextTick(() => inputPanelRef.value?.focus());
 }
 
 async function fetchChildrenForActiveSessions() {
@@ -6314,16 +6384,7 @@ setInterval(() => {
   void fetchChildrenForActiveSessions();
 }, 15_000);
 
-watch(
-  () => queue.value.filter((entry) => entry.isMessage && !entry.isSubagentMessage).length,
-  () => {
-    nextTick(() => {
-      if (!isFollowing.value) return;
-      scrollToBottom();
-      updateFollowState();
-    });
-  },
-);
+
 
 const FILE_READ_EVENT_TYPES = new Set([
   'file.read',
@@ -9916,7 +9977,7 @@ async function connect(options: { failFast?: boolean; timeoutMs?: number } = {})
         });
         const resolvedDirectory = eventDirectory || sessionInfo.directory || '';
         if (sessionInfo.projectID && resolvedDirectory) {
-          sessionGraphStore.setProjectDirectory(sessionInfo.projectID, resolvedDirectory);
+          sessionGraphStore.addDirectoryCandidate(resolvedDirectory, sessionInfo.projectID);
         }
         if (sessionInfo.parentID) {
           subagentSessionExpiry.set(sessionInfo.id, Date.now() + SUBAGENT_ACTIVE_TTL_MS);

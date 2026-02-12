@@ -14,49 +14,51 @@ export function useOutputPanelFollow(options: {
     return options.outputPanelRef.value?.panelEl ?? null;
   }
 
-  function scrollToBottom() {
+  function isAtBottom() {
     const panel = getPanelElement();
-    if (!panel) return;
-    panel.scrollTop = Math.max(0, panel.scrollHeight - panel.clientHeight);
+    if (!panel) return true;
+    return panel.scrollHeight - panel.scrollTop - panel.clientHeight <= options.followThresholdPx;
   }
 
-  function updateFollowState() {
+  function scrollToBottom(smooth = false) {
     const panel = getPanelElement();
     if (!panel) return;
-    const distanceFromBottom = panel.scrollHeight - panel.scrollTop - panel.clientHeight;
-    options.isFollowing.value = distanceFromBottom <= options.followThresholdPx;
+    const target = Math.max(0, panel.scrollHeight - panel.clientHeight);
+    if (smooth) {
+      panel.scrollTo({ top: target, behavior: 'smooth' });
+    } else {
+      panel.scrollTop = target;
+    }
   }
 
   function handleOutputPanelScroll() {
-    updateFollowState();
+    options.isFollowing.value = isAtBottom();
   }
 
   function handleOutputPanelWheel(event: WheelEvent) {
     if (event.deltaY < 0) {
       options.isFollowing.value = false;
-      return;
     }
-    updateFollowState();
   }
 
   function scheduleFollowScroll() {
     if (!options.isFollowing.value) return;
-    nextTick(() => {
-      requestAnimationFrame(() => {
-        scrollToBottom();
-        updateFollowState();
-      });
-    });
+    nextTick(() => scrollToBottom());
   }
 
-  function resumeFollow() {
+  let smoothFollowTimer: ReturnType<typeof setTimeout> | undefined;
+
+  function resumeFollow(smooth = false) {
     options.isFollowing.value = true;
-    nextTick(scrollToBottom);
+    nextTick(() => scrollToBottom(smooth));
+    if (!smooth) return;
+    clearTimeout(smoothFollowTimer);
+    smoothFollowTimer = setTimeout(() => {
+      options.isFollowing.value = true;
+    }, 500);
   }
 
   return {
-    scrollToBottom,
-    updateFollowState,
     handleOutputPanelScroll,
     handleOutputPanelWheel,
     scheduleFollowScroll,
