@@ -1,4 +1,6 @@
-import { nextTick, type Ref } from 'vue';
+import { nextTick, onUnmounted, type Ref } from 'vue';
+import type { MessagePartUpdatedPacket, MessageUpdatedPacket } from '../types/sse';
+import type { SessionScope } from './useGlobalEvents';
 
 export type ReasoningFinish = {
   id: string;
@@ -15,12 +17,14 @@ type FileReadEntry = {
 };
 
 export function useReasoningWindows(options: {
+  scope?: SessionScope;
   selectedSessionId: Ref<string>;
   queue: Ref<FileReadEntry[]>;
   toolWindowCanvasEl: Ref<HTMLDivElement | null>;
   reasoningCloseDelayMs: number;
 }) {
   const { selectedSessionId, queue, toolWindowCanvasEl, reasoningCloseDelayMs } = options;
+  let boundScope = options.scope;
 
   const reasoningTitleBySessionId = new Map<string, string>();
   const reasoningCloseTimers = new Map<string, number>();
@@ -126,6 +130,65 @@ export function useReasoningWindows(options: {
     finishedReasoningByKey.clear();
   }
 
+  // ── SSE event subscriptions ───────────────────────────────────────────────
+
+  const unsubs: Array<() => void> = [];
+
+  function subscribe(scope: SessionScope) {
+    unsubs.forEach((fn) => fn());
+    unsubs.length = 0;
+    boundScope = scope;
+
+    unsubs.push(
+      scope.on('message.part.updated', (packet: MessagePartUpdatedPacket) => {
+        if (packet.part.type !== 'reasoning') return;
+
+        const part = packet.part;
+        const resolvedSessionId = part.sessionID || selectedSessionId.value;
+        const reasoningKey = getReasoningKey(resolvedSessionId);
+        const messageId = part.messageID;
+
+        clearReasoningCloseTimerForSession(resolvedSessionId);
+
+        if (part.text) {
+          const firstLine = part.text.split('\n')[0]?.trim();
+          if (firstLine) {
+            reasoningTitleBySessionId.set(resolvedSessionId, firstLine);
+          }
+        }
+
+        activeReasoningMessageIdByKey.set(reasoningKey, messageId);
+        lastReasoningMessageIdByKey.set(reasoningKey, messageId);
+
+        if (part.time?.end) {
+          markReasoningFinished(resolvedSessionId, messageId);
+          scheduleReasoningClose(resolvedSessionId);
+        }
+      }),
+    );
+
+    unsubs.push(
+      scope.on('message.updated', (packet: MessageUpdatedPacket) => {
+        if (packet.info.role !== 'assistant') return;
+
+        const resolvedSessionId = packet.info.sessionID || selectedSessionId.value;
+        const messageId = packet.info.id;
+
+        if (packet.info.time.completed || packet.info.error) {
+          markReasoningFinished(resolvedSessionId, messageId);
+          scheduleReasoningClose(resolvedSessionId);
+        }
+      }),
+    );
+  }
+
+  if (boundScope) subscribe(boundScope);
+
+  onUnmounted(() => {
+    unsubs.forEach((fn) => fn());
+    unsubs.length = 0;
+  });
+
   return {
     reasoningTitleBySessionId,
     reasoningCloseTimers,
@@ -141,6 +204,7 @@ export function useReasoningWindows(options: {
     scheduleReasoningClose,
     scheduleReasoningScroll,
     reset,
+    bindScope: subscribe,
   };
 }
 

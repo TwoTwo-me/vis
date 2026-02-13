@@ -26,6 +26,10 @@
               <OutputPanel
                 ref="outputPanelRef"
                 class="output-panel"
+                :roots="msg.roots.value"
+                :get-children="msg.getChildren"
+                :get-thread="msg.getThread"
+                :get-final-answer="msg.getFinalAnswer"
                 :queue="queue"
                 :is-following="isFollowing"
                 :status-text="statusText"
@@ -247,6 +251,7 @@ type FileReadEntry = {
   attachments?: MessageAttachment[];
   isWrite: boolean;
   isMessage: boolean;
+  isQuestionAnswer?: boolean;
   isSubagentMessage?: boolean;
   isReasoning?: boolean;
   isShell?: boolean;
@@ -328,7 +333,7 @@ type TodoPanelSession = {
   isSubagent: boolean;
   todos: TodoItem[];
   loading: boolean;
-  error?: string;
+  error: string | undefined;
 };
 
 type TreeNode = {
@@ -1255,7 +1260,7 @@ function persistSidePanelCollapsed(value: boolean) {
   }
 }
 
-function readSidePanelTab() {
+function readSidePanelTab(): 'todo' | 'tree' {
   if (typeof window === 'undefined') return 'todo' as const;
   const raw = window.localStorage.getItem(SIDE_PANEL_TAB_STORAGE_KEY);
   return raw === 'tree' ? 'tree' : 'todo';
@@ -3579,48 +3584,35 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
       if (selectedSessionId.value !== sessionId) return;
       if (getSelectedWorktreeDirectory() !== requestedDirectory) return;
     }
-    data.forEach((message, index) => {
+    const history: Array<{
+      id: string;
+      role?: string;
+      parentID?: string;
+      finish?: string;
+      text: string;
+      attachments: MessageAttachment[];
+      meta: UserMessageMeta | null;
+      usage: MessageUsage | null;
+      messageTime?: number;
+      info?: Record<string, unknown>;
+      sourceIndex: number;
+    }> = [];
+
+    data.forEach((message, sourceIndex) => {
       const info = message.info as Record<string, unknown> | undefined;
       const parts = message.parts as unknown;
+      const text = parseMessageTextFromParts(parts) ?? '';
+      const attachments = parseImageAttachmentsFromParts(parts);
       const id = typeof info?.id === 'string' ? info.id : undefined;
       const role = typeof info?.role === 'string' ? info.role : undefined;
-      if (id && role === 'assistant' && Array.isArray(parts)) {
-        parseMessageDiffsFromParts(parts, id, sessionId);
-      }
-    });
-
-    const history = data
-      .map((message, sourceIndex) => {
-        const info = message.info as Record<string, unknown> | undefined;
-        const parts = message.parts as unknown;
-        const text = parseMessageTextFromParts(parts) ?? '';
-        const attachments = parseImageAttachmentsFromParts(parts);
-        const id = typeof info?.id === 'string' ? info.id : undefined;
-        const role = typeof info?.role === 'string' ? info.role : undefined;
-        const parentID = typeof info?.parentID === 'string' ? info.parentID : undefined;
-        const finish = typeof info?.finish === 'string' ? info.finish : undefined;
-        const meta = parseUserMessageMeta(info);
-        const usage = resolveMessageUsageFromInfo(info);
-        const messageTime = parseMessageTime(info);
-        if (!id) return null;
-        if (!parentID && !text.trim() && attachments.length === 0) {
-          return {
-            id,
-            role,
-            parentID,
-            finish,
-            text,
-            attachments,
-            meta,
-            usage,
-            messageTime,
-            info,
-            sourceIndex,
-          };
-        }
-        const hasError = info?.error && typeof info.error === 'object';
-        if (parentID && !text.trim() && attachments.length === 0 && !hasError) return null;
-        return {
+      const parentID = typeof info?.parentID === 'string' ? info.parentID : undefined;
+      const finish = typeof info?.finish === 'string' ? info.finish : undefined;
+      const meta = parseUserMessageMeta(info);
+      const usage = resolveMessageUsageFromInfo(info);
+      const messageTime = parseMessageTime(info);
+      if (!id) return;
+      if (!parentID && !text.trim() && attachments.length === 0) {
+        history.push({
           id,
           role,
           parentID,
@@ -3632,25 +3624,25 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
           messageTime,
           info,
           sourceIndex,
-        };
-      })
-      .filter(
-        (
-          entry,
-        ): entry is {
-          id: string;
-          role?: string;
-          parentID?: string;
-          finish?: string;
-          text: string;
-          attachments: MessageAttachment[];
-          meta: UserMessageMeta | null;
-          usage: MessageUsage | null;
-          messageTime?: number;
-          info?: Record<string, unknown>;
-          sourceIndex: number;
-        } => Boolean(entry),
-      );
+        });
+        return;
+      }
+      const hasError = info?.error && typeof info.error === 'object';
+      if (parentID && !text.trim() && attachments.length === 0 && !hasError) return;
+      history.push({
+        id,
+        role,
+        parentID,
+        finish,
+        text,
+        attachments,
+        meta,
+        usage,
+        messageTime,
+        info,
+        sourceIndex,
+      });
+    });
     const historyMeta = new Map<
       string,
       {
@@ -3663,7 +3655,7 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
     >();
 
     msg.loadHistory(
-      (history as Array<any>).map((entry: any) => ({
+      history.map((entry) => ({
         id: entry.id,
         sessionId,
         parentId: entry.parentID,
@@ -3742,6 +3734,7 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
           scroll: overflowLines > 0,
           scrollDistance,
           scrollDuration,
+          scrollDelay: 0,
           html: '',
           attachments: entry.attachments,
           isWrite: false,
@@ -3826,6 +3819,7 @@ async function fetchHistory(sessionId: string, isSubagentMessage = false) {
         scroll: false,
         scrollDistance: 0,
         scrollDuration: 0,
+        scrollDelay: 0,
         html: '',
         attachments: root.attachments,
         isWrite: false,
@@ -4127,6 +4121,16 @@ type DebugToolEvent = {
 
 function buildDebugToolEvents(_tool: string): DebugToolEvent[] | null {
   return null;
+}
+
+function injectSyntheticEvent(payload: Record<string, unknown>) {
+  if (!src.value) return;
+  const synthetic = new MessageEvent('message', { data: JSON.stringify(payload) });
+  src.value.dispatchEvent(synthetic);
+}
+
+function openDebugSessionViewer() {
+  void refreshSessionDiff();
 }
 
 function runDebugTool(tool: string) {
@@ -4473,6 +4477,16 @@ async function reloadSelectedSessionState() {
   todoErrorBySessionId.value = {};
   if (selectedSessionId.value) {
     await fetchHistory(selectedSessionId.value);
+    nextTick(() => {
+      runWithoutOutputPanelTracking(() => {
+        scrollOutputPanelToBottom(false);
+      });
+      requestAnimationFrame(() => {
+        runWithoutOutputPanelTracking(() => {
+          scrollOutputPanelToBottom(false);
+        });
+      });
+    });
     await restoreShellSessions(selectedSessionId.value);
     void reloadTodosForAllowedSessions();
     void refreshSessionDiff();
@@ -4504,8 +4518,6 @@ function pruneIdleEphemeralSessions() {
   const changed = sessionGraphStore.pruneEphemeralChildren(CHILD_SESSION_PRUNE_TTL_MS, keep);
   if (changed) markSessionGraphChanged();
 }
-
-watch(selectedSessionId, reloadSelectedSessionState, { immediate: true });
 
 watch(
   [selectedProjectId, selectedSessionId],
@@ -4621,49 +4633,15 @@ setInterval(() => {
 
 
 
-const FILE_READ_EVENT_TYPES = new Set([
-  'file.read',
-  'file_read',
-  'fileRead',
-  'read_file',
-  'readFile',
-  'FileRead',
-  'file:read',
-  'session.diff',
-  'session_diff',
-  'sessionDiff',
-  'SessionDiff',
-  'session:diff',
-]);
+const FILE_READ_EVENT_TYPES = new Set(['session.diff', 'file.edited']);
 
-const FILE_WRITE_EVENT_TYPES = new Set([
-  'file.write',
-  'file_write',
-  'fileWrite',
-  'write_file',
-  'writeFile',
-  'FileWrite',
-  'file:write',
-  'session.write',
-  'session_write',
-  'sessionWrite',
-  'session:write',
-]);
+const FILE_WRITE_EVENT_TYPES = new Set<string>([]);
 
 const MESSAGE_EVENT_TYPES = new Set([
-  'message',
-  'session.message',
-  'session_message',
-  'sessionMessage',
-  'message:delta',
-  'message.delta',
-  'message_delta',
   'message.updated',
-  'message_updated',
-  'messageUpdated',
   'message.part.updated',
-  'message_part_updated',
-  'messagePartUpdated',
+  'message.removed',
+  'message.part.removed',
 ]);
 
 const ge = useGlobalEvents({
@@ -4705,9 +4683,10 @@ const ge = useGlobalEvents({
 } as any);
 
 const sessionScope = ge.session(selectedSessionId, sessionParentById as any);
-const msg = useMessages(sessionScope, {
-  getAllowedSessionIds: () => allowedSessionIds.value,
-});
+const msg = useMessages(sessionScope);
+reasoning.bindScope(sessionScope);
+
+watch(selectedSessionId, reloadSelectedSessionState, { immediate: true });
 
 function parsePayload(raw: string) {
   try {
@@ -4998,34 +4977,32 @@ function parseQuestionRequest(value: unknown, fallbackSessionId?: string): Quest
     : Array.isArray(record.items)
       ? record.items
       : [];
-  const questions: QuestionInfo[] = questionsRaw
-    .map((item) => {
-      if (!item || typeof item !== 'object') return null;
-      const info = item as Record<string, unknown>;
-      const question = typeof info.question === 'string' ? info.question.trim() : '';
-      const header = typeof info.header === 'string' ? info.header.trim() : '';
-      const optionsRaw = Array.isArray(info.options) ? info.options : [];
-      const options: QuestionOption[] = optionsRaw
-        .map((option) => {
-          if (!option || typeof option !== 'object') return null;
-          const optionInfo = option as Record<string, unknown>;
-          const label = typeof optionInfo.label === 'string' ? optionInfo.label.trim() : '';
-          const description =
-            typeof optionInfo.description === 'string' ? optionInfo.description.trim() : '';
-          if (!label || !description) return null;
-          return { label, description };
-        })
-        .filter((entry): entry is QuestionOption => Boolean(entry));
-      if (!question || !header || options.length === 0) return null;
-      return {
-        question,
-        header,
-        options,
-        multiple: info.multiple === true,
-        custom: info.custom !== false,
-      };
-    })
-    .filter((entry): entry is QuestionInfo => Boolean(entry));
+  const questions: QuestionInfo[] = [];
+  questionsRaw.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const info = item as Record<string, unknown>;
+    const question = typeof info.question === 'string' ? info.question.trim() : '';
+    const header = typeof info.header === 'string' ? info.header.trim() : '';
+    const optionsRaw = Array.isArray(info.options) ? info.options : [];
+    const options: QuestionOption[] = [];
+    optionsRaw.forEach((option) => {
+      if (!option || typeof option !== 'object') return;
+      const optionInfo = option as Record<string, unknown>;
+      const label = typeof optionInfo.label === 'string' ? optionInfo.label.trim() : '';
+      const description =
+        typeof optionInfo.description === 'string' ? optionInfo.description.trim() : '';
+      if (!label || !description) return;
+      options.push({ label, description });
+    });
+    if (!question || !header || options.length === 0) return;
+    questions.push({
+      question,
+      header,
+      options,
+      multiple: info.multiple === true,
+      custom: info.custom !== false,
+    });
+  });
   const toolRaw =
     record.tool && typeof record.tool === 'object'
       ? (record.tool as Record<string, unknown>)
@@ -5280,11 +5257,12 @@ function buildTreeNodes(items: unknown[], directory: string, parentPath: string)
       if (node.ignored) existing.ignored = true;
       return;
     }
+    const normalizedType: TreeNode['type'] = node.type === 'directory' ? 'directory' : 'file';
     unique.set(path, {
       name,
       path,
-      type: isLeaf ? (node.type ?? 'file') : 'directory',
-      children: isLeaf && node.type !== 'directory' ? undefined : [],
+      type: isLeaf ? normalizedType : 'directory',
+      children: isLeaf && normalizedType !== 'directory' ? undefined : [],
       loaded: false,
       ignored: Boolean(node.ignored),
       synthetic: false,
@@ -6857,12 +6835,8 @@ function parseMessageFinish(payload: unknown, eventType: string) {
       : typeof (record.sessionID as string | undefined) === 'string'
         ? (record.sessionID as string)
         : undefined;
-  const messageId =
-    typeof info?.id === 'string'
-      ? (info.id as string)
-      : typeof (info?.messageId as string | undefined) === 'string'
-        ? (info.messageId as string)
-        : undefined;
+  const infoMessageId = typeof info?.messageId === 'string' ? info.messageId : undefined;
+  const messageId = typeof info?.id === 'string' ? (info.id as string) : infoMessageId;
   const parentID = typeof info?.parentID === 'string' ? (info.parentID as string) : undefined;
   return { finish, sessionId, messageId, parentID, error };
 }
@@ -7578,6 +7552,7 @@ async function handleQuestionReply(payload: { requestId: string; answers: Questi
         scroll: false,
         scrollDistance: 0,
         scrollDuration: 0,
+        scrollDelay: 0,
         html: '',
         isWrite: false,
         isMessage: false,
@@ -7952,7 +7927,12 @@ async function connect(options: { failFast?: boolean; timeoutMs?: number } = {})
         fw.open(callId, {
           content: renderEditDiffHtml({ diff: patchEvent.content, code: patchEvent.code, after: patchEvent.after, lang: patchLang }),
           variant: 'diff',
-          status: patchEvent.toolStatus,
+          status:
+            patchEvent.toolStatus === 'running' ||
+            patchEvent.toolStatus === 'completed' ||
+            patchEvent.toolStatus === 'error'
+              ? patchEvent.toolStatus
+              : undefined,
           title: patchEvent.toolTitle ?? patchEvent.path ?? 'apply_patch',
           color: toolColor(patchEvent.toolName),
         });
@@ -7975,7 +7955,10 @@ async function connect(options: { failFast?: boolean; timeoutMs?: number } = {})
         const { callId, toolName, toolStatus, ...rest } = entry;
         fw.open(callId, {
           ...rest,
-          status: toolStatus,
+          status:
+            toolStatus === 'running' || toolStatus === 'completed' || toolStatus === 'error'
+              ? toolStatus
+              : undefined,
           color: toolColor(toolName),
         });
       }
@@ -8020,6 +8003,7 @@ async function reconnectAndReconcile() {
   reconnectInFlight = true;
   try {
     await connect({ failFast: true, timeoutMs: 5000 });
+    await ge.connect({ failFast: true, timeoutMs: 5000 });
     await reconcileSessionGraphFromScopes();
     await fetchProviders(true);
     connectionState.value = 'ready';
@@ -8048,6 +8032,7 @@ async function startInitialization() {
     connectionState.value = 'connecting';
     initLoadingMessage.value = 'Connecting to SSE stream...';
     await connect({ failFast: true, timeoutMs: 5000 });
+    await ge.connect({ failFast: true, timeoutMs: 5000 });
     connectionState.value = 'bootstrapping';
     initLoadingMessage.value = 'Loading server path...';
     await fetchHomePath();
@@ -8199,6 +8184,7 @@ onBeforeUnmount(() => {
     reconnectTimer = null;
   }
   src.value?.close();
+  ge.disconnect();
   disposeShellWindows({ preserve: true });
 });
 </script>

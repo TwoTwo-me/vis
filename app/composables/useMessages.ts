@@ -6,28 +6,14 @@ import type {
   MessageStatus,
   MessageUsage,
 } from '../types/message';
+import type {
+  MessagePartUpdatedPacket,
+  MessageUpdatedPacket,
+  TextPart,
+} from '../types/sse';
+import type { SessionScope } from './useGlobalEvents';
 
-const SAFETY_NET_INTERVAL_MS = 30_000;
-
-type MessageScope = {
-  on(event: string, listener: (payload: unknown) => void): () => void;
-};
-
-type UseMessagesOptions = {
-  getAllowedSessionIds?: () => Set<string>;
-};
-
-type MessageShape = Partial<Message> & {
-  id?: string;
-  messageId?: string;
-  partId?: string;
-  partType?: string;
-  sessionId?: string;
-  sessionID?: string;
-  parentID?: string;
-  isPartUpdatedEvent?: boolean;
-  bodyContent?: string;
-};
+type AssistantMessageInfo = Extract<MessageUpdatedPacket['info'], { role: 'assistant' }>;
 
 function toRecord(value: unknown): Record<string, unknown> | undefined {
   if (!value || typeof value !== 'object') return undefined;
@@ -50,33 +36,59 @@ function asStatus(value: unknown): MessageStatus | undefined {
   return value === 'streaming' || value === 'complete' || value === 'error' ? value : undefined;
 }
 
-function normalizeUsage(value: unknown): MessageUsage | undefined {
+function normalizeTokens(value: unknown): MessageUsage['tokens'] | undefined {
   const rec = toRecord(value);
-  const tokens = toRecord(rec?.tokens);
-  if (!tokens) return undefined;
-  const input = asNumber(tokens.input);
-  const output = asNumber(tokens.output);
-  const reasoning = asNumber(tokens.reasoning);
+  if (!rec) return undefined;
+  const input = asNumber(rec.input);
+  const output = asNumber(rec.output);
+  const reasoning = asNumber(rec.reasoning);
   if (input === undefined || output === undefined || reasoning === undefined) return undefined;
-  const cacheRec = toRecord(tokens.cache);
+  const cacheRec = toRecord(rec.cache);
   const cacheRead = asNumber(cacheRec?.read);
   const cacheWrite = asNumber(cacheRec?.write);
   return {
-    tokens: {
-      input,
-      output,
-      reasoning,
-      cache:
-        cacheRead === undefined || cacheWrite === undefined
-          ? undefined
-          : { read: cacheRead, write: cacheWrite },
-    },
+    input,
+    output,
+    reasoning,
+    cache:
+      cacheRead === undefined || cacheWrite === undefined
+        ? undefined
+        : { read: cacheRead, write: cacheWrite },
+  };
+}
+
+function normalizeUsage(value: unknown): MessageUsage | undefined {
+  const rec = toRecord(value);
+  const tokens = normalizeTokens(rec?.tokens);
+  if (!tokens) return undefined;
+  return {
+    tokens,
     cost: asNumber(rec?.cost),
     providerId: asString(rec?.providerId),
     modelId: asString(rec?.modelId),
     contextPercent:
       rec?.contextPercent === null ? null : (asNumber(rec?.contextPercent) ?? undefined),
   };
+}
+
+function normalizeUsageFromMessage(info: MessageUpdatedPacket['info']): MessageUsage | undefined {
+  if (info.role !== 'assistant') return undefined;
+  const tokens = normalizeTokens(info.tokens);
+  if (!tokens) return undefined;
+  return {
+    tokens,
+    cost: asNumber(info.cost),
+    providerId: asString(info.providerID),
+    modelId: asString(info.modelID),
+  };
+}
+
+function normalizeMessageError(
+  value: AssistantMessageInfo['error'] | undefined,
+): Message['error'] | undefined {
+  if (!value) return undefined;
+  const message = asString(toRecord(value.data)?.message) ?? '';
+  return { name: value.name, message };
 }
 
 function normalizeAttachments(value: unknown): MessageAttachment[] | undefined {
@@ -120,7 +132,21 @@ function byTimeThenId(a: Message, b: Message): number {
   return a.id.localeCompare(b.id);
 }
 
-export function useMessages(scope: MessageScope, options: UseMessagesOptions = {}) {
+function resolveMessageStatus(info: MessageUpdatedPacket['info'], current?: MessageStatus): MessageStatus {
+  if (info.role === 'user') return 'complete';
+  if (info.error || info.finish === 'error') return 'error';
+  if (info.time.completed !== undefined || info.finish) return 'complete';
+  return current === 'complete' ? 'complete' : 'streaming';
+}
+
+function resolveStreamedPartText(previous: string, packet: MessagePartUpdatedPacket, part: TextPart): string {
+  if (typeof packet.delta === 'string' && packet.delta.length > 0) {
+    return previous + packet.delta;
+  }
+  return part.text;
+}
+
+export function useMessages(scope: SessionScope) {
   const messages = shallowReactive(new Map<string, Message>());
   const messagePartsById = new Map<string, Map<string, string>>();
   const messagePartOrderById = new Map<string, string[]>();
@@ -169,118 +195,50 @@ export function useMessages(scope: MessageScope, options: UseMessagesOptions = {
     return order.map((key) => parts.get(key) ?? '').join('');
   }
 
-  function parseMessagePayload(
-    payload: unknown,
-  ): { sessionId?: string; message: MessageShape } | null {
-    const rec = toRecord(payload);
-    if (!rec) return null;
-    const nested = toRecord(rec.message);
-    const message = (nested ?? rec) as MessageShape;
-    const sessionId = asString(rec.sessionId) ?? asString(rec.sessionID) ?? message.sessionId;
-    return { sessionId, message };
-  }
-
-  function handleMessageContent(payload: unknown) {
-    const parsed = parseMessagePayload(payload);
-    if (!parsed) return;
-    const sessionId = parsed.sessionId ?? parsed.message.sessionId ?? parsed.message.sessionID;
-    const id = parsed.message.id ?? parsed.message.messageId;
-    if (!sessionId || !id) return;
-
-    const message = parsed.message;
-    const partId = asString(message.partId);
-    const rawContent = typeof message.content === 'string' ? message.content : '';
-    const content =
-      partId && rawContent.length > 0
-        ? resolveStreamingContent(id, partId, rawContent)
-        : rawContent;
-
-    setMessage(id, {
-      sessionId,
-      parentId: asString(message.parentId) ?? asString(message.parentID),
-      role:
-        asRole(message.role) ??
-        (asString(message.parentId ?? message.parentID) ? 'assistant' : 'user'),
+  function handleMessagePartUpdated(packet: MessagePartUpdatedPacket) {
+    if (packet.part.type !== 'text') return;
+    const part = packet.part;
+    const messageId = part.messageID;
+    const partId = part.id;
+    const previous = messagePartsById.get(messageId)?.get(partId) ?? '';
+    const partText = resolveStreamedPartText(previous, packet, part);
+    const content = resolveStreamingContent(messageId, partId, partText);
+    const existing = messages.get(messageId);
+    setMessage(messageId, {
+      sessionId: part.sessionID,
+      role: existing?.role,
       content,
-      status: asStatus(message.status) ?? 'streaming',
-      agent: asString(message.agent),
-      model: asString(message.model),
-      providerId: asString(message.providerId),
-      modelId: asString(message.modelId),
-      variant: asString(message.variant),
-      time: asNumber(message.time),
-      error:
-        message.error && typeof message.error === 'object'
-          ? {
-              name: asString((message.error as Record<string, unknown>).name) ?? 'Error',
-              message: asString((message.error as Record<string, unknown>).message) ?? '',
-            }
-          : null,
-      classification:
-        message.classification === 'real_user' ||
-        message.classification === 'system_injection' ||
-        message.classification === 'unknown'
-          ? message.classification
-          : undefined,
+      status: existing?.status === 'error' ? 'error' : 'streaming',
+      time: existing?.time,
     });
   }
 
-  function handleMessageFinish(payload: unknown) {
-    const rec = toRecord(payload);
-    if (!rec) return;
-    const id = asString(rec.messageId);
-    if (!id) return;
-    const finish = asString(rec.finish);
-    const status: MessageStatus = finish === 'error' || rec.error ? 'error' : 'complete';
-    const errorRec = toRecord(rec.error);
+  function handleMessageUpdated(packet: MessageUpdatedPacket) {
+    const info = packet.info;
+    const id = info.id;
+    const existing = messages.get(id);
+    const usage = normalizeUsageFromMessage(info);
+    const error = normalizeMessageError(info.role === 'assistant' ? info.error : undefined);
+    const status = resolveMessageStatus(info, existing?.status);
+
     setMessage(id, {
-      sessionId: asString(rec.sessionId) ?? asString(rec.sessionID),
-      parentId: asString(rec.parentId) ?? asString(rec.parentID),
+      sessionId: info.sessionID,
+      role: info.role,
+      parentId: info.role === 'assistant' ? info.parentID : undefined,
+      content: existing?.content ?? '',
       status,
-      error:
-        status === 'error'
-          ? {
-              name: asString(errorRec?.name) ?? 'Error',
-              message: asString(errorRec?.message) ?? '',
-            }
-          : null,
-    });
-  }
-
-  function handleMessageUsage(payload: unknown) {
-    const rec = toRecord(payload);
-    if (!rec) return;
-    const id = asString(rec.messageId);
-    if (!id) return;
-    const usage = normalizeUsage(rec.usage);
-    if (!usage) return;
-    setMessage(id, {
-      sessionId: asString(rec.sessionId) ?? asString(rec.sessionID),
+      agent: asString(info.agent),
+      providerId:
+        info.role === 'assistant'
+          ? asString(info.providerID)
+          : asString(toRecord(info.model)?.providerID),
+      modelId:
+        info.role === 'assistant' ? asString(info.modelID) : asString(toRecord(info.model)?.modelID),
+      variant: asString(info.variant),
+      time: asNumber(info.time.created),
       usage,
-    });
-  }
-
-  function handleMessageAttachments(payload: unknown) {
-    const rec = toRecord(payload);
-    if (!rec) return;
-    const id = asString(rec.messageId);
-    if (!id) return;
-    const attachments = normalizeAttachments(rec.attachments);
-    setMessage(id, {
-      sessionId: asString(rec.sessionId) ?? asString(rec.sessionID),
-      attachments,
-    });
-  }
-
-  function handleMessageDiffs(payload: unknown) {
-    const rec = toRecord(payload);
-    if (!rec) return;
-    const id = asString(rec.messageId);
-    if (!id) return;
-    const diffs = normalizeDiffs(rec.diffs);
-    setMessage(id, {
-      sessionId: asString(rec.sessionId) ?? asString(rec.sessionID),
-      diffs,
+      diffs: info.role === 'user' ? normalizeDiffs(info.summary?.diffs) : undefined,
+      error: error ?? (status === 'error' ? { name: 'Error', message: '' } : null),
     });
   }
 
@@ -340,37 +298,21 @@ export function useMessages(scope: MessageScope, options: UseMessagesOptions = {
     messagePartOrderById.clear();
   }
 
-  function runSafetyNetGc() {
-    const allowedSessionIds = options.getAllowedSessionIds?.();
-    if (!allowedSessionIds || allowedSessionIds.size === 0) return;
-    for (const [id, message] of messages.entries()) {
-      if (allowedSessionIds.has(message.sessionId)) continue;
-      messages.delete(id);
-      messagePartsById.delete(id);
-      messagePartOrderById.delete(id);
-    }
-  }
-
   const unsubscribers = [
-    scope.on('message:content', handleMessageContent),
-    scope.on('message:finish', handleMessageFinish),
-    scope.on('message:usage', handleMessageUsage),
-    scope.on('message:attachments', handleMessageAttachments),
-    scope.on('message:diffs', handleMessageDiffs),
-    scope.on('message:parsed', handleMessageContent),
+    scope.on('message.part.updated', handleMessagePartUpdated),
+    scope.on('message.updated', handleMessageUpdated),
   ];
-
-  const gcTimer = setInterval(runSafetyNetGc, SAFETY_NET_INTERVAL_MS);
 
   function dispose() {
     for (const unsubscribe of unsubscribers) unsubscribe();
-    clearInterval(gcTimer);
   }
 
   onUnmounted(dispose);
 
   const roots = computed(() => {
-    return [...messages.values()].filter((msg) => !msg.parentId).sort(byTimeThenId);
+    return [...messages.values()]
+      .filter((msg) => !msg.parentId || !messages.has(msg.parentId))
+      .sort(byTimeThenId);
   });
 
   const streaming = computed(() => {
