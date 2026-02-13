@@ -8486,7 +8486,6 @@ function upsertPrimaryAssistantIntoRound(
   if (meta?.attachments && meta.attachments.length > 0) {
     messageAttachmentsById.set(assistantMessageKey, meta.attachments);
   }
-  scheduleFollowScroll();
 }
 
 function applyMessageErrorToRound(
@@ -8582,7 +8581,6 @@ function promoteFinalAnswerToOutputPanel(
       if (attachments && attachments.length > 0) {
         messageAttachmentsById.set(finalMessageKey, attachments);
       }
-      scheduleFollowScroll();
       return;
     }
   }
@@ -8632,7 +8630,6 @@ function promoteFinalAnswerToOutputPanel(
     messageAttachmentsById.set(finalMessageKey, attachments);
   }
 
-  scheduleFollowScroll();
 }
 
 function formatRetryTime(timestamp: number): string {
@@ -10260,7 +10257,7 @@ async function connect(options: { failFast?: boolean; timeoutMs?: number } = {})
         if (attachments && attachments.length > 0) {
           messageAttachmentsById.set(roundMessageKey, attachments);
         }
-        if (!isSubagentMessage) scheduleFollowScroll();
+        if (!isSubagentMessage && existingRoundIndex >= 0) scheduleFollowScroll();
         return;
       }
 
