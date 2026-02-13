@@ -154,19 +154,9 @@ onBeforeUnmount(() => {
 .message-content :deep(.markdown-host h4),
 .message-content :deep(.markdown-host h5),
 .message-content :deep(.markdown-host h6) {
-  margin: 0;
+  margin: 0.5em 0;
   padding: 0;
-}
-
-.message-content :deep(.markdown-host h1),
-.message-content :deep(.markdown-host h2),
-.message-content :deep(.markdown-host h3),
-.message-content :deep(.markdown-host h4),
-.message-content :deep(.markdown-host h5),
-.message-content :deep(.markdown-host h6) {
-  margin: 0.8em 0 0.4em;
   font-weight: 600;
-  line-height: 1.3;
   color: #e2e8f0;
 }
 
@@ -174,10 +164,6 @@ onBeforeUnmount(() => {
 .message-content :deep(.markdown-host h2) { font-size: 1.25em; }
 .message-content :deep(.markdown-host h3) { font-size: 1.1em; }
 .message-content :deep(.markdown-host h4) { font-size: 1em; }
-
-.message-content :deep(.markdown-host p) {
-  margin: 0.5em 0;
-}
 
 .message-content :deep(.markdown-host a) {
   color: #60a5fa;
