@@ -10722,6 +10722,7 @@ onBeforeUnmount(() => {
 .output-panel {
   flex: 1 1 auto;
   width: auto;
+  min-width: 0;
   height: 100%;
   min-height: 0;
 }

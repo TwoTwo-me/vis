@@ -295,7 +295,7 @@ onBeforeUnmount(() => {
 
 .message-content :deep(.markdown-host code:not(pre code)) {
   display: inline;
-  white-space: nowrap;
+  white-space: pre-wrap;
   font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, 'Liberation Mono', monospace;
   font-size: 0.95em;
   color: #79B8FF;
@@ -312,7 +312,6 @@ onBeforeUnmount(() => {
 
 .message-content :deep(.markdown-host pre code) {
   display: block;
-  white-space: pre;
   background: transparent;
   border: 0;
   padding: 0;
