@@ -1332,10 +1332,18 @@ function applyComposerDraftToComposerState(draft: ComposerDraft, contextKey: str
   }
 }
 
+function hasRestorableComposerContent(draft: ComposerDraft) {
+  return draft.messageInput.trim().length > 0 || draft.attachments.length > 0;
+}
+
 function restoreComposerDraftForContext(contextKey: string): boolean {
   if (!contextKey) return false;
   const draft = readComposerDraft(contextKey);
   if (!draft) return false;
+  if (!hasRestorableComposerContent(draft)) {
+    clearComposerInputState();
+    return false;
+  }
   applyComposerDraftToComposerState(draft, contextKey);
   return true;
 }
@@ -1490,6 +1498,11 @@ function handleComposerDraftStorage(event: StorageEvent) {
   const draft = store[contextKey] ?? null;
   const knownRev = composerDraftRevisionByContext.get(contextKey) ?? 0;
   if (!draft) {
+    composerDraftRevisionByContext.delete(contextKey);
+    clearComposerInputState();
+    return;
+  }
+  if (!hasRestorableComposerContent(draft)) {
     composerDraftRevisionByContext.delete(contextKey);
     clearComposerInputState();
     return;
