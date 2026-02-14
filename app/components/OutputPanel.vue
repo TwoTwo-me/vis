@@ -335,7 +335,7 @@ function hasAssistantMessages(root: MessageInfo): boolean {
 
 function showHistoryButton(root: MessageInfo): boolean {
   const count = getAssistantMessages(root).length;
-  return count > 1 || (props.isThinking && isThreadStreaming(root));
+  return count > 0;
 }
 
 function showThreadHistory(root: MessageInfo) {
