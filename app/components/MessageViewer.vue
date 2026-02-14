@@ -288,6 +288,7 @@ onBeforeUnmount(() => {
 .message-content :deep(.markdown-host hr) {
   border: 0;
   border-top: 1px solid rgba(148, 163, 184, 0.35);
+  margin: 0.3em 0;
 }
 
 .message-content :deep(.markdown-host table) {
