@@ -25,9 +25,10 @@
         <div v-for="item in attachments" :key="item.id" class="attachment-item">
           <img
             v-if="item.mime.startsWith('image/')"
-            class="attachment-thumb"
+            class="attachment-thumb clickable"
             :src="item.dataUrl"
             :alt="item.filename"
+            @click="$emit('open-image', { url: item.dataUrl, filename: item.filename })"
           />
           <div class="attachment-meta">
             <div class="attachment-name">{{ item.filename }}</div>
@@ -230,6 +231,7 @@ const emit = defineEmits<{
   (event: 'abort'): void;
   (event: 'add-attachments', files: File[]): void;
   (event: 'remove-attachment', id: string): void;
+  (event: 'open-image', payload: { url: string; filename: string }): void;
 }>();
 
 const messageValue = computed({
@@ -820,6 +822,10 @@ const inputMessageStyle = computed(() => {
   border: 1px solid #334155;
   object-fit: cover;
   background: #0b1320;
+}
+
+.attachment-thumb.clickable {
+  cursor: pointer;
 }
 
 .attachment-meta {

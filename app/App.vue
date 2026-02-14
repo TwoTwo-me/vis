@@ -124,6 +124,7 @@
           @abort="abortSession"
           @add-attachments="handleAddAttachments"
           @remove-attachment="removeAttachment"
+          @open-image="handleOpenImage"
         />
       </footer>
     </template>
