@@ -526,6 +526,7 @@ function submitAssistantRender(rootId: string, answerId: string, content: string
     appliedSeqMap.set(rootId, seq);
     assistantHtmlCache.set(rootId, html);
     deferredKeyCache.set(rootId, answerId);
+    handleMessageRendered(getThreadAssistantRenderKeyById(rootId, answerId));
   });
 }
 
@@ -568,7 +569,11 @@ function getThreadUserRenderKey(root: MessageInfo): string {
 
 function getThreadAssistantRenderKey(root: MessageInfo): string {
   const final = getFinalAnswer(root);
-  return `thread-assistant:${root.id}:${final?.id ?? 'none'}`;
+  return getThreadAssistantRenderKeyById(root.id, final?.id);
+}
+
+function getThreadAssistantRenderKeyById(rootId: string, answerId?: string): string {
+  return `thread-assistant:${rootId}:${answerId ?? 'none'}`;
 }
 
 function getThreadTransitionKey(root: MessageInfo): string {
