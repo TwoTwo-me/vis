@@ -1,37 +1,36 @@
-import { nextTick, onUnmounted, type Ref } from 'vue';
+import { onUnmounted, reactive, type Component, type Ref } from 'vue';
 import type { MessagePartUpdatedPacket, MessageUpdatedPacket } from '../types/sse';
 import type { SessionScope } from './useGlobalEvents';
-import { renderWorkerHtml } from '../utils/workerRenderer';
+import type { useFloatingWindows } from './useFloatingWindows';
 
 export type ReasoningFinish = {
   id: string;
   time: number;
 };
 
-type FileReadEntry = {
-  messageKey?: string;
-  follow?: boolean;
-  isReasoning?: boolean;
-  sessionId?: string;
-  expiresAt: number;
-  content?: string;
-  html?: string;
-  x?: number;
-  y?: number;
-  [key: string]: unknown;
+type ReasoningEntry = {
+  id: string;
+  text: string;
 };
 
-export function useReasoningWindows(options: {
+type UseReasoningWindowsOptions = {
   scope?: SessionScope;
   selectedSessionId: Ref<string>;
-  queue: Ref<FileReadEntry[]>;
-  toolWindowCanvasEl: Ref<HTMLDivElement | null>;
+  fw: ReturnType<typeof useFloatingWindows>;
+  reasoningComponent: Component;
+  theme: () => string;
   reasoningCloseDelayMs: number;
-}) {
-  const { selectedSessionId, queue, toolWindowCanvasEl, reasoningCloseDelayMs } = options;
+};
+
+const REASONING_WINDOW_PREFIX = 'reasoning:';
+const REASONING_WINDOW_COLOR = '#8b5cf6';
+
+export function useReasoningWindows(options: UseReasoningWindowsOptions) {
+  const { selectedSessionId, fw, reasoningComponent, theme, reasoningCloseDelayMs } = options;
   let boundScope = options.scope;
 
-  const reasoningTitleBySessionId = new Map<string, string>();
+  const entriesBySession = reactive(new Map<string, ReasoningEntry[]>());
+
   const reasoningCloseTimers = new Map<string, number>();
   const lastReasoningMessageIdByKey = new Map<string, string>();
   const activeReasoningMessageIdByKey = new Map<string, string>();
@@ -41,8 +40,8 @@ export function useReasoningWindows(options: {
     return sessionId ?? selectedSessionId.value ?? 'main';
   }
 
-  function getMessageKey(messageId: string, sessionId?: string) {
-    return `${sessionId || 'main'}:${messageId}`;
+  function getWindowKey(sessionId?: string) {
+    return `${REASONING_WINDOW_PREFIX}${sessionId || 'main'}`;
   }
 
   function getReasoningFinish(reasoningKey: string, messageId?: string) {
@@ -76,6 +75,14 @@ export function useReasoningWindows(options: {
     clearReasoningCloseTimer(getReasoningKey(sessionId));
   }
 
+  function closeReasoningWindow(sessionId: string) {
+    const windowKey = getWindowKey(sessionId);
+    if (fw.has(windowKey)) {
+      void fw.close(windowKey);
+    }
+    entriesBySession.delete(sessionId);
+  }
+
   function updateReasoningExpiry(sessionId: string | undefined, status: 'busy' | 'idle') {
     if (!sessionId && !selectedSessionId.value) return;
     const targetSessionId = sessionId ?? selectedSessionId.value;
@@ -85,21 +92,10 @@ export function useReasoningWindows(options: {
     const isFinished = Boolean(finish);
     if (status === 'idle' && !isFinished) return;
     if (status === 'busy' && isFinished) return;
-    const now = Date.now();
-    const nextExpiresAt =
-      status === 'busy'
-        ? Number.MAX_SAFE_INTEGER
-        : finish
-          ? finish.time + reasoningCloseDelayMs
-          : now;
-    queue.value.forEach((entry) => {
-      if (!entry.isReasoning) return;
-      const matchesSession =
-        entry.sessionId === targetSessionId ||
-        (!entry.sessionId && targetSessionId === selectedSessionId.value);
-      if (!matchesSession) return;
-      entry.expiresAt = nextExpiresAt;
-    });
+
+    if (status === 'idle' && isFinished) {
+      closeReasoningWindow(targetSessionId);
+    }
   }
 
   function scheduleReasoningClose(sessionId?: string) {
@@ -109,37 +105,25 @@ export function useReasoningWindows(options: {
     if (!resolvedSessionId) return;
     const timer = window.setTimeout(() => {
       reasoningCloseTimers.delete(reasoningKey);
-      updateReasoningExpiry(resolvedSessionId, 'idle');
+      closeReasoningWindow(resolvedSessionId);
     }, reasoningCloseDelayMs);
     reasoningCloseTimers.set(reasoningKey, timer);
   }
 
-  function scheduleReasoningScroll(messageKey: string) {
-    nextTick(() => {
-      requestAnimationFrame(() => {
-        const canvas = toolWindowCanvasEl.value;
-        if (!canvas) return;
-        const entry = queue.value.find((item) => item.messageKey === messageKey);
-        if (entry && entry.follow === false) return;
-        if (entry) entry.follow = true;
-        const term = canvas.querySelector(
-          `[data-message-key="${messageKey}"] .term-inner`,
-        ) as HTMLElement | null;
-        if (!term) return;
-        term.scrollTop = Math.max(0, term.scrollHeight - term.clientHeight);
-      });
-    });
-  }
-
   function reset() {
-    reasoningTitleBySessionId.clear();
+    reasoningCloseTimers.forEach((timer) => {
+      window.clearTimeout(timer);
+    });
     reasoningCloseTimers.clear();
     lastReasoningMessageIdByKey.clear();
     activeReasoningMessageIdByKey.clear();
     finishedReasoningByKey.clear();
+    entriesBySession.clear();
+    fw.entries.value.forEach((entry) => {
+      if (!entry.key.startsWith(REASONING_WINDOW_PREFIX)) return;
+      void fw.close(entry.key);
+    });
   }
-
-  // ── SSE event subscriptions ───────────────────────────────────────────────
 
   const unsubs: Array<() => void> = [];
 
@@ -156,64 +140,48 @@ export function useReasoningWindows(options: {
         const resolvedSessionId = part.sessionID || selectedSessionId.value;
         const reasoningKey = getReasoningKey(resolvedSessionId);
         const messageId = part.messageID;
+        const partId = part.id;
+        const messageText = part.text || '';
+        const windowKey = getWindowKey(resolvedSessionId);
 
         clearReasoningCloseTimerForSession(resolvedSessionId);
-
-        if (part.text) {
-          const firstLine = part.text.split('\n')[0]?.trim();
-          if (firstLine) {
-            reasoningTitleBySessionId.set(resolvedSessionId, firstLine);
-          }
+        if (finishedReasoningByKey.has(reasoningKey)) {
+          finishedReasoningByKey.delete(reasoningKey);
         }
 
         activeReasoningMessageIdByKey.set(reasoningKey, messageId);
         lastReasoningMessageIdByKey.set(reasoningKey, messageId);
 
-        const messageKey = getMessageKey(messageId, resolvedSessionId);
-        let entry = queue.value.find((e) => e.messageKey === messageKey);
-
-        if (!entry) {
-          const { x, y } = (() => {
-            const el = toolWindowCanvasEl.value;
-            const w = el?.clientWidth || window.innerWidth;
-            const h = el?.clientHeight || window.innerHeight;
-            const targetW = 600;
-            const targetH = 400;
-            const maxX = Math.max(0, w - targetW - 20);
-            const maxY = Math.max(0, h - targetH - 20);
-            return {
-              x: 20 + Math.floor(Math.random() * maxX),
-              y: 20 + Math.floor(Math.random() * maxY),
-            };
-          })();
-
-          entry = {
-            messageKey,
-            sessionId: resolvedSessionId,
-            isReasoning: true,
-            expiresAt: Number.MAX_SAFE_INTEGER,
-            content: part.text || '',
-            html: '',
-            time: Date.now(),
-            follow: true,
-            x,
-            y,
-          };
-          queue.value.push(entry);
+        let sessionEntries = entriesBySession.get(resolvedSessionId);
+        if (!sessionEntries) {
+          sessionEntries = [];
+          entriesBySession.set(resolvedSessionId, sessionEntries);
+        }
+        const existingIndex = sessionEntries.findIndex((e) => e.id === partId);
+        if (existingIndex >= 0) {
+          sessionEntries[existingIndex] = { id: partId, text: messageText };
         } else {
-          entry.content = part.text || '';
+          sessionEntries.push({ id: partId, text: messageText });
         }
 
-        if (entry.content) {
-          renderWorkerHtml({
-            id: `reasoning-${messageId}`,
-            code: entry.content,
-            lang: 'markdown',
-            theme: 'dark-plus',
-          }).then((html) => {
-            if (entry) entry.html = html;
-          });
-        }
+        const firstLine = messageText.split('\n')[0]?.trim() || 'Reasoning';
+
+        void fw.open(windowKey, {
+          component: reasoningComponent,
+          props: {
+            entries: [...sessionEntries],
+            theme: theme(),
+          },
+          title: `🤔 ${firstLine}`,
+          scroll: 'follow',
+          resizable: true,
+          closable: false,
+          color: REASONING_WINDOW_COLOR,
+          variant: 'message',
+          expiresAt: Number.MAX_SAFE_INTEGER,
+          width: 600,
+          height: 400,
+        });
 
         if (part.time?.end) {
           markReasoningFinished(resolvedSessionId, messageId);
@@ -242,11 +210,13 @@ export function useReasoningWindows(options: {
   onUnmounted(() => {
     unsubs.forEach((fn) => fn());
     unsubs.length = 0;
+    reasoningCloseTimers.forEach((timer) => {
+      window.clearTimeout(timer);
+    });
+    reasoningCloseTimers.clear();
   });
 
   return {
-    reasoningTitleBySessionId,
-    reasoningCloseTimers,
     lastReasoningMessageIdByKey,
     activeReasoningMessageIdByKey,
     finishedReasoningByKey,
@@ -257,7 +227,6 @@ export function useReasoningWindows(options: {
     clearReasoningCloseTimerForSession,
     updateReasoningExpiry,
     scheduleReasoningClose,
-    scheduleReasoningScroll,
     reset,
     bindScope: subscribe,
   };

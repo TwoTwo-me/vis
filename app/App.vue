@@ -173,6 +173,7 @@ import hexdump from '@kikuchan/hexdump';
 import FloatingWindow from './components/FloatingWindow.vue';
 import BashContent from './components/ToolWindow/Bash.vue';
 import DefaultContent from './components/ToolWindow/Default.vue';
+import ReasoningContent from './components/ToolWindow/Reasoning.vue';
 import SidePanel from './components/SidePanel.vue';
 import TopPanel from './components/TopPanel.vue';
 import PermissionContent from './components/ToolWindow/Permission.vue';
@@ -202,11 +203,8 @@ import { createSessionGraphStore } from './utils/sessionGraph';
 
 const OPENCODE_BASE_URL = 'http://localhost:4096';
 const FOLLOW_THRESHOLD_PX = 24;
-const FLOATING_FOLLOW_THRESHOLD_PX = 2;
 const TOOL_PENDING_TTL_MS = 60_000;
 const TOOL_COMPLETE_TTL_MS = 2_000;
-const TOOL_SCROLL_SPEED_PX_S = 2000;
-const TOOL_SCROLL_HOLD_MS = 250;
 const SUBAGENT_ACTIVE_TTL_MS = 60 * 60 * 1000;
 const CHILD_SESSION_PRUNE_TTL_MS = 20 * 60 * 1000;
 const ROOT_SESSION_BOOTSTRAP_LIMIT = 100_000;
@@ -260,7 +258,6 @@ type FileReadEntry = {
   isMessage: boolean;
   isQuestionAnswer?: boolean;
   isSubagentMessage?: boolean;
-  isReasoning?: boolean;
   isShell?: boolean;
   isPermission?: boolean;
   isQuestion?: boolean;
@@ -459,6 +456,7 @@ type ComposerDraft = {
 };
 
 const queue = ref<FileReadEntry[]>([]);
+const fw = useFloatingWindows();
 const appEl = ref<HTMLDivElement | null>(null);
 const outputEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLElement | null>(null);
@@ -577,7 +575,6 @@ const pendingShellFits = new Map<string, number>();
 const ptyMetaDecoder = new TextDecoder();
 let floatingExtentResizeObserver: ResizeObserver | null = null;
 let floatingExtentObservedEl: HTMLDivElement | null = null;
-const pendingToolScrollFrames = new Map<string, number>();
 const permissionSendingById = ref<Record<string, boolean>>({});
 const permissionErrorById = ref<Record<string, string>>({});
 const questionSendingById = ref<Record<string, boolean>>({});
@@ -738,21 +735,12 @@ const selectedSessionId = ref('');
 
 const reasoning = useReasoningWindows({
   selectedSessionId,
-  queue: queue as any,
-  toolWindowCanvasEl,
+  fw,
+  reasoningComponent: ReasoningContent,
+  theme: () => 'github-dark',
   reasoningCloseDelayMs: REASONING_CLOSE_DELAY_MS,
 });
 const {
-  reasoningTitleBySessionId,
-  lastReasoningMessageIdByKey,
-  activeReasoningMessageIdByKey,
-  finishedReasoningByKey,
-  getReasoningKey,
-  getReasoningFinish,
-  markReasoningFinished,
-  clearReasoningCloseTimerForSession,
-  scheduleReasoningClose,
-  scheduleReasoningScroll,
   updateReasoningExpiry,
 } = reasoning;
 
@@ -1981,68 +1969,6 @@ function pickShikiTheme(names: string[]) {
   return darkMatch ?? names[0];
 }
 
-function getEntryTitle(entry: FileReadEntry) {
-  const prefix = getEntryPrefix(entry);
-  const isFloatingMessage = entry.isReasoning || entry.isSubagentMessage;
-  const withPrefix = (title: string) => {
-    const resolvedTitle = title.trim() || 'message';
-    if (isFloatingMessage) return `🤔 ${resolvedTitle}`;
-    return `[${prefix}] ${resolvedTitle}`;
-  };
-  if (entry.isPermission) {
-    const permission = entry.permissionRequest?.permission;
-    return permission ? withPrefix(`Permission: ${permission}`) : withPrefix('Permission request');
-  }
-  if (entry.isQuestion) {
-    const header = entry.questionRequest?.questions?.[0]?.header;
-    return header ? withPrefix(`Question: ${header}`) : withPrefix('Question request');
-  }
-  if (entry.isShell) return withPrefix(entry.shellTitle ?? 'Shell');
-  if (entry.isReasoning) {
-    const sessionTitle = getSessionTitle(entry.sessionId);
-    const reasoningTitle = entry.sessionId
-      ? reasoningTitleBySessionId.get(entry.sessionId)
-      : undefined;
-    return withPrefix(reasoningTitle ?? sessionTitle ?? 'Reasoning');
-  }
-  if (entry.isSubagentMessage) {
-    const sessionTitle = getSessionTitle(entry.sessionId);
-    if (sessionTitle) return withPrefix(sessionTitle);
-  }
-  const displayPath = resolveWorktreeRelativePath(entry.path);
-  if (displayPath && (entry.toolName === 'read' || entry.toolName === 'apply_patch'))
-    return withPrefix(displayPath);
-  if (entry.toolTitle) return withPrefix(entry.toolTitle);
-  if (entry.toolName) return withPrefix(entry.toolName);
-  if (displayPath) return withPrefix(displayPath);
-  if (entry.header) {
-    const cleaned = entry.header.trim().replace(/^#\s*/, '').trim();
-    if (cleaned) return withPrefix(cleaned);
-  }
-  return withPrefix('tool');
-}
-
-function getEntryPrefix(entry: FileReadEntry) {
-  if (entry.isPermission) return 'PERMISSION';
-  if (entry.isQuestion) return 'QUESTION';
-  if (entry.isShell) return 'SHELL';
-  if (entry.isReasoning) return 'MESSAGE';
-  if (entry.isSubagentMessage || entry.isMessage) return 'MESSAGE';
-  if (entry.toolName === 'apply_patch') return 'PATCH';
-  if (entry.toolName === 'edit' || entry.toolName === 'multiedit') return 'EDIT';
-  if (entry.toolName === 'write' || entry.isWrite) return 'WRITE';
-  if (entry.toolName === 'read') return 'READ';
-  if (entry.toolName === 'grep') return 'GREP';
-  if (entry.toolName === 'glob') return 'GLOB';
-  if (entry.toolName === 'list') return 'LS';
-  if (entry.toolName === 'bash') return 'SHELL';
-  if (entry.toolName === 'webfetch') return 'FETCH';
-  if (entry.toolName === 'websearch') return 'SEARCH';
-  if (entry.toolName === 'codesearch') return 'CODE';
-  if (entry.toolName) return entry.toolName.toUpperCase();
-  return 'MESSAGE';
-}
-
 function getSubagentExpiry(sessionId?: string) {
   const now = Date.now();
   if (!sessionId) return now + SUBAGENT_ACTIVE_TTL_MS;
@@ -2207,99 +2133,6 @@ function handlePointerUp() {
   resizeState.value = null;
   if (inputResizeState.value) scheduleShellFitAll();
   inputResizeState.value = null;
-}
-
-function isNearBottom(target: HTMLElement, threshold = FLOATING_FOLLOW_THRESHOLD_PX) {
-  return target.scrollHeight - target.clientHeight - target.scrollTop <= threshold;
-}
-
-function updateFloatingFollow(entry: FileReadEntry, target: HTMLElement) {
-  const nextFollow = isNearBottom(target);
-  if (entry.follow !== nextFollow) entry.follow = nextFollow;
-}
-
-function handleFloatingScroll(entry: FileReadEntry, event: Event) {
-  if (!entry.isReasoning && !entry.isSubagentMessage) return;
-  const target = event.currentTarget as HTMLElement | null;
-  if (!target) return;
-  updateFloatingFollow(entry, target);
-}
-
-function handleFloatingWheel(entry: FileReadEntry, event: WheelEvent) {
-  if (!entry.isReasoning && !entry.isSubagentMessage) return;
-  const target = event.currentTarget as HTMLElement | null;
-  if (!target) return;
-  requestAnimationFrame(() => {
-    updateFloatingFollow(entry, target);
-  });
-}
-
-function handleToolWindowRendered(entry: FileReadEntry) {
-  if (entry.isReasoning || entry.isSubagentMessage) {
-    if (entry.messageKey) scheduleReasoningScroll(entry.messageKey);
-    return;
-  }
-  if (!entry.toolKey) return;
-  scheduleToolScrollAnimation(entry.toolKey);
-}
-
-function scheduleToolScrollAnimation(toolKey: string) {
-  const existing = pendingToolScrollFrames.get(toolKey);
-  if (existing !== undefined) {
-    cancelAnimationFrame(existing);
-    pendingToolScrollFrames.delete(toolKey);
-  }
-  nextTick(() => {
-    const frame = requestAnimationFrame(() => {
-      pendingToolScrollFrames.delete(toolKey);
-      const canvas = toolWindowCanvasEl.value;
-      if (!canvas) return;
-      const term = canvas.querySelector(
-        `[data-tool-key="${toolKey}"] .term-inner`,
-      ) as HTMLElement | null;
-      if (!term) return;
-      const host = term.querySelector('.code-content, .shiki-host') as HTMLElement | null;
-      if (!host) return;
-
-      const distance = Math.max(0, host.scrollHeight - term.clientHeight);
-      const entry = queue.value.find((e) => e.toolKey === toolKey);
-      if (!entry) return;
-
-      if (distance <= 1) {
-        if (!entry.scroll) return;
-        entry.scroll = false;
-        entry.scrollDistance = 0;
-        entry.scrollDuration = 0;
-        return;
-      }
-
-      const duration = distance / TOOL_SCROLL_SPEED_PX_S;
-      const sameDistance = Math.abs((entry.scrollDistance ?? 0) - distance) < 1;
-      const sameDuration = Math.abs((entry.scrollDuration ?? 0) - duration) < 0.01;
-      if (entry.scroll && sameDistance && sameDuration) return;
-
-      if (entry.scroll) {
-        entry.scroll = false;
-        entry.scrollDistance = distance;
-        entry.scrollDuration = duration;
-        nextTick(() => {
-          requestAnimationFrame(() => {
-            const current = queue.value.find((e) => e.toolKey === toolKey);
-            if (!current) return;
-            current.scroll = true;
-            current.scrollDistance = distance;
-            current.scrollDuration = duration;
-          });
-        });
-        return;
-      }
-
-      entry.scroll = true;
-      entry.scrollDistance = distance;
-      entry.scrollDuration = duration;
-    });
-    pendingToolScrollFrames.set(toolKey, frame);
-  });
 }
 
 function markSessionGraphChanged() {
@@ -3476,10 +3309,6 @@ function applyUserMessageMetaToQueue(messageId: string, meta: UserMessageMeta) {
   const displayMeta = resolveUserMessageDisplay(meta);
   if (!displayMeta) return;
   queue.value.forEach((entry, index) => {
-    const matchesReasoningMessage = Boolean(
-      entry.isReasoning &&
-      activeReasoningMessageIdByKey.get(getReasoningKey(entry.sessionId)) === messageId,
-    );
     if (!entry.isMessage) return;
     if (entry.isRound && entry.roundMessages) {
       const existingRoundMessages = entry.roundMessages;
@@ -3515,7 +3344,7 @@ function applyUserMessageMetaToQueue(messageId: string, meta: UserMessageMeta) {
         return;
       }
     }
-    if (entry.messageId !== messageId && !matchesReasoningMessage) return;
+    if (entry.messageId !== messageId) return;
     queue.value.splice(index, 1, {
       ...entry,
       messageAgent: displayMeta.agent ?? entry.messageAgent,
@@ -3527,10 +3356,6 @@ function applyUserMessageMetaToQueue(messageId: string, meta: UserMessageMeta) {
 
 function applyUserMessageTimeToQueue(messageId: string, messageTime: number) {
   queue.value.forEach((entry, index) => {
-    const matchesReasoningMessage = Boolean(
-      entry.isReasoning &&
-      activeReasoningMessageIdByKey.get(getReasoningKey(entry.sessionId)) === messageId,
-    );
     if (!entry.isMessage) return;
     if (entry.isRound && entry.roundMessages) {
       const existingRoundMessages = entry.roundMessages;
@@ -3553,7 +3378,7 @@ function applyUserMessageTimeToQueue(messageId: string, messageTime: number) {
         return;
       }
     }
-    if (entry.messageId !== messageId && !matchesReasoningMessage) return;
+    if (entry.messageId !== messageId) return;
     queue.value.splice(index, 1, {
       ...entry,
       messageTime,
@@ -4296,49 +4121,6 @@ async function abortSession() {
     sendStatus.value = `Stop failed: ${toErrorMessage(error)}`;
   } finally {
     isAborting.value = false;
-  }
-}
-
-const fw = useFloatingWindows();
-
-// Sync floating message entries (reasoning, subagent) from queue → fw
-function syncFloatingMessages() {
-  const floatingKeys = new Set<string>();
-  queue.value.forEach((entry) => {
-    const isFloating = entry.isReasoning || (entry.isSubagentMessage && entry.isMessage);
-    if (!isFloating) return;
-    const messageKey = entry.messageKey;
-    if (!messageKey) return;
-    const key = `message:${messageKey}`;
-    floatingKeys.add(key);
-    const title = getEntryTitle(entry);
-    const content = entry.content || '';
-    const lang = 'markdown';
-    const alreadyOpen = fw.has(key);
-    fw.open(key, {
-      content,
-      lang,
-      title,
-      scroll: 'follow',
-      resizable: true,
-      closable: false,
-      color: entry.isReasoning ? '#8b5cf6' : '#6366f1',
-      variant: 'message',
-      ...(!alreadyOpen && {
-        x: entry.x,
-        y: entry.y,
-        width: entry.width,
-        height: entry.height,
-      }),
-      expiresAt: entry.expiresAt,
-    });
-  });
-  // Remove fw entries for floating messages that no longer exist in queue
-  for (const entry of fw.entries.value) {
-    if (!entry.key.startsWith('message:')) continue;
-    if (!floatingKeys.has(entry.key)) {
-      fw.close(entry.key);
-    }
   }
 }
 
@@ -7995,10 +7777,6 @@ onBeforeUnmount(() => {
   floatingExtentResizeObserver?.disconnect();
   floatingExtentResizeObserver = null;
   floatingExtentObservedEl = null;
-  pendingToolScrollFrames.forEach((frame) => {
-    cancelAnimationFrame(frame);
-  });
-  pendingToolScrollFrames.clear();
   while (globalEventUnsubscribers.length > 0) {
     const dispose = globalEventUnsubscribers.pop();
     dispose?.();
