@@ -6,6 +6,17 @@
         <div class="text-xs font-normal">OpenCode Visualizer</div>
       </div>
       <div class="top-center">
+        <button
+          type="button"
+          class="control-button notification-button"
+          :class="{ 'has-notifications': notifications.length > 0 }"
+          :title="notifications.length > 0 ? `${totalNotificationCount} pending notifications` : 'No notifications'"
+          :disabled="notifications.length === 0"
+          @click="$emit('select-notification')"
+        >
+          <Icon :icon="notifications.length > 0 ? 'lucide:bell-ring' : 'lucide:bell'" :width="16" :height="16" />
+          <span v-if="notifications.length > 0" class="notification-badge">{{ totalNotificationCount }}</span>
+        </button>
         <Dropdown
           class="tree-dropdown-root"
           :label="dropdownLabel"
@@ -164,6 +175,11 @@ export type TopPanelWorktree = {
   sandboxes: TopPanelSandbox[];
 };
 
+export type TopPanelNotificationSession = {
+  sessionId: string;
+  count: number;
+};
+
 type SessionSelectPayload = {
   worktree: string;
   directory: string;
@@ -172,13 +188,20 @@ type SessionSelectPayload = {
 
 const props = defineProps<{
   treeData: TopPanelWorktree[];
+  notificationSessions: TopPanelNotificationSession[];
   projectDirectory: string;
   activeDirectory: string;
   selectedSessionId: string;
   homePath?: string;
 }>();
 
+const notifications = computed(() => props.notificationSessions ?? []);
+const totalNotificationCount = computed(() =>
+  notifications.value.reduce((sum, item) => sum + item.count, 0),
+);
+
 const emit = defineEmits<{
+  (event: 'select-notification'): void;
   (event: 'select-session', payload: SessionSelectPayload): void;
   (event: 'create-worktree-from', worktree: string): void;
   (event: 'new-session'): void;
@@ -717,6 +740,35 @@ function handleOpenDirectory(close: () => void) {
   height: 32px;
   padding: 0;
   justify-content: center;
+}
+
+.notification-button {
+  position: relative;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  justify-content: center;
+  color: #64748b;
+}
+
+.notification-button.has-notifications {
+  color: #fbbf24;
+}
+
+.notification-badge {
+  position: absolute;
+  top: -5px;
+  right: -5px;
+  min-width: 16px;
+  height: 16px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: #ef4444;
+  color: #fff;
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
 }
 
 .tree-dropdown-root :deep(.ui-dropdown-button) {

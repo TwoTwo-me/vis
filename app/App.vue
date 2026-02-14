@@ -4,10 +4,12 @@
       <header class="app-header">
         <TopPanel
           :tree-data="topPanelTreeData"
+          :notification-sessions="notificationSessions"
           :project-directory="projectDirectory"
           :active-directory="activeDirectory"
           :selected-session-id="selectedSessionId"
           :home-path="homePath"
+          @select-notification="handleNotificationSessionSelect"
           @create-worktree-from="createWorktreeFromWorktree"
           @new-session="createNewSession"
           @delete-active-directory="deleteWorktree"
@@ -233,7 +235,7 @@ import GrepContent from './components/ToolWindow/Grep.vue';
 import ReasoningContent from './components/ToolWindow/Reasoning.vue';
 import WebContent from './components/ToolWindow/Web.vue';
 import SidePanel from './components/SidePanel.vue';
-import TopPanel, { type TopPanelWorktree } from './components/TopPanel.vue';
+import TopPanel, { type TopPanelNotificationSession, type TopPanelWorktree } from './components/TopPanel.vue';
 import PermissionContent from './components/ToolWindow/Permission.vue';
 import QuestionContent from './components/ToolWindow/Question.vue';
 import FileViewerContent from './components/FileViewer.vue';
@@ -614,6 +616,9 @@ const permissionSendingById = ref<Record<string, boolean>>({});
 const permissionErrorById = ref<Record<string, string>>({});
 const questionSendingById = ref<Record<string, boolean>>({});
 const questionErrorById = ref<Record<string, string>>({});
+const pendingNotificationsBySessionId = ref(new Map<string, Set<string>>());
+const notificationSessionOrder = ref<string[]>([]);
+const notificationPermissionRequested = ref(false);
 
 const sidePanelCollapsed = ref(readSidePanelCollapsed());
 const sidePanelActiveTab = ref(readSidePanelTab());
@@ -1026,6 +1031,16 @@ const allowedSessionIds = computed(() => {
 
 const todoPanelCount = computed(() =>
   Object.values(todosBySessionId.value).reduce((sum, todos) => sum + todos.length, 0),
+);
+
+const notificationSessions = computed<TopPanelNotificationSession[]>(() =>
+  notificationSessionOrder.value
+    .filter((sessionId) => pendingNotificationsBySessionId.value.has(sessionId))
+    .map((sessionId) => ({
+      sessionId,
+      count: pendingNotificationsBySessionId.value.get(sessionId)?.size ?? 0,
+    }))
+    .filter((item) => item.count > 0),
 );
 
 const todoPanelSessions = computed(() => {
@@ -2830,6 +2845,38 @@ function handleTopPanelSessionSelect(payload: {
   projectDirectory.value = payload.worktree;
   activeDirectory.value = payload.directory;
   selectedSessionId.value = payload.sessionId;
+  removePendingNotification(`idle:${payload.sessionId}`);
+}
+
+function selectSessionById(sessionId: string) {
+  let targetSessionId = sessionId;
+  const parentMap = sessionParentById.value;
+  while (parentMap.get(targetSessionId)) {
+    targetSessionId = parentMap.get(targetSessionId) ?? targetSessionId;
+  }
+  const worktreeEntry = topPanelTreeData.value.find((worktree) =>
+    worktree.sandboxes.some((sandbox) => sandbox.sessions.some((session) => session.id === targetSessionId)),
+  );
+  if (!worktreeEntry) return;
+  const sandboxEntry = worktreeEntry.sandboxes.find((sandbox) =>
+    sandbox.sessions.some((session) => session.id === targetSessionId),
+  );
+  if (!sandboxEntry) return;
+  handleTopPanelSessionSelect({
+    worktree: worktreeEntry.directory,
+    directory: sandboxEntry.directory,
+    sessionId: targetSessionId,
+  });
+}
+
+function handleNotificationSessionSelect() {
+  const queue = notificationSessionOrder.value.filter((sessionId) =>
+    pendingNotificationsBySessionId.value.has(sessionId),
+  );
+  if (queue.length === 0) return;
+  const nextSessionId = queue.find((sessionId) => sessionId !== selectedSessionId.value) ?? queue[0];
+  if (!nextSessionId) return;
+  selectSessionById(nextSessionId);
 }
 
 async function deleteSession(sessionId: string) {
@@ -2840,6 +2887,7 @@ async function deleteSession(sessionId: string) {
     const directory = activeDirectory.value.trim();
     await opencodeApi.deleteSession(credentials.baseUrl.value, sessionId, directory || undefined);
     if (selectedSessionId.value === sessionId) selectedSessionId.value = '';
+    clearNotificationSession(sessionId);
     removeSessionFromGraph(sessionId);
     deleteSessionStatus(sessionId, selectedProjectId.value);
     void refreshSessionsForDirectory(activeDirectory.value || undefined);
@@ -3265,6 +3313,115 @@ async function fetchPendingQuestions(directory?: string) {
   } catch (error) {
     log('Question list failed', error);
   }
+}
+
+function clearNotificationSession(sessionId: string) {
+  if (!sessionId || !pendingNotificationsBySessionId.value.has(sessionId)) return;
+  const next = new Map(pendingNotificationsBySessionId.value);
+  next.delete(sessionId);
+  pendingNotificationsBySessionId.value = next;
+  notificationSessionOrder.value = notificationSessionOrder.value.filter((id) => id !== sessionId);
+}
+
+function ensureBrowserNotificationPermission() {
+  if (typeof window === 'undefined' || typeof Notification === 'undefined') return;
+  if (Notification.permission !== 'default') return;
+  if (notificationPermissionRequested.value) return;
+  notificationPermissionRequested.value = true;
+  void Notification.requestPermission();
+}
+
+function showBrowserNotification(sessionId: string, type: 'permission' | 'question' | 'idle') {
+  if (typeof window === 'undefined' || typeof document === 'undefined') return;
+  if (typeof Notification === 'undefined') return;
+  if (!document.hidden) return;
+  if (Notification.permission !== 'granted') return;
+  const session = sessions.value.find((entry) => entry.id === sessionId);
+  const kind = type === 'permission' ? 'Permission' : type === 'question' ? 'Question' : 'Session idle';
+  const body =
+    type === 'idle'
+      ? session ? `${sessionLabel(session)} is now idle.` : `Session ${sessionId} is now idle.`
+      : session ? `${sessionLabel(session)} requires your response.` : `Session ${sessionId} requires your response.`;
+  const notification = new Notification(`${kind}`, {
+    body,
+    tag: `vis-${type}-${sessionId}`,
+  });
+  notification.onclick = () => {
+    window.focus();
+    selectSessionById(sessionId);
+    notification.close();
+  };
+}
+
+function addPendingNotification(sessionId: string, requestId: string, type: 'permission' | 'question' | 'idle') {
+  if (!sessionId || !requestId) return;
+  ensureBrowserNotificationPermission();
+  const next = new Map(pendingNotificationsBySessionId.value);
+  const requestSet = new Set(next.get(sessionId) ?? []);
+  const wasPresent = requestSet.has(requestId);
+  requestSet.add(requestId);
+  next.set(sessionId, requestSet);
+  pendingNotificationsBySessionId.value = next;
+  if (!notificationSessionOrder.value.includes(sessionId)) {
+    notificationSessionOrder.value = [...notificationSessionOrder.value, sessionId];
+  }
+  if (!wasPresent) {
+    showBrowserNotification(sessionId, type);
+  }
+}
+
+function removePendingNotification(requestId: string) {
+  if (!requestId) return;
+  const next = new Map(pendingNotificationsBySessionId.value);
+  for (const [sessionId, requestSet] of next.entries()) {
+    if (!requestSet.has(requestId)) continue;
+    const updatedSet = new Set(requestSet);
+    updatedSet.delete(requestId);
+    if (updatedSet.size === 0) {
+      next.delete(sessionId);
+      notificationSessionOrder.value = notificationSessionOrder.value.filter((id) => id !== sessionId);
+    } else {
+      next.set(sessionId, updatedSet);
+    }
+    pendingNotificationsBySessionId.value = next;
+    return;
+  }
+}
+
+function reconcilePendingNotifications() {
+  notificationSessionOrder.value = notificationSessionOrder.value.filter((sessionId) =>
+    pendingNotificationsBySessionId.value.has(sessionId),
+  );
+}
+
+async function fetchAllPendingNotifications(directory?: string) {
+  try {
+    const permissionData = await opencodeApi.listPendingPermissions(credentials.baseUrl.value, directory);
+    if (Array.isArray(permissionData)) {
+      permissionData
+        .map((entry) => parsePermissionRequest(entry))
+        .filter((entry): entry is PermissionRequest => Boolean(entry))
+        .forEach((entry) => {
+          addPendingNotification(entry.sessionID, entry.id, 'permission');
+        });
+    }
+  } catch (error) {
+    log('Pending permission notifications failed', error);
+  }
+  try {
+    const questionData = await opencodeApi.listPendingQuestions(credentials.baseUrl.value, directory);
+    if (Array.isArray(questionData)) {
+      questionData
+        .map((entry) => parseQuestionRequest(entry))
+        .filter((entry): entry is QuestionRequest => Boolean(entry))
+        .forEach((entry) => {
+          addPendingNotification(entry.sessionID, entry.id, 'question');
+        });
+    }
+  } catch (error) {
+    log('Pending question notifications failed', error);
+  }
+  reconcilePendingNotifications();
 }
 
 type UserMessageMeta = {
@@ -4621,6 +4778,14 @@ watch(
     if (!isValid) {
       if (preferredId) selectedSessionId.value = preferredId;
     }
+  },
+  { immediate: true },
+);
+
+watch(
+  sessions,
+  () => {
+    reconcilePendingNotifications();
   },
   { immediate: true },
 );
@@ -6399,6 +6564,13 @@ function applySessionStatusEvent(
     if (nextStatus === 'busy') {
       const session = sessionGraphStore.getSession(sessionId, projectId);
       void fetchSessionChildren(sessionId, session?.directory || activeDirectory.value || undefined, projectId);
+      removePendingNotification(`idle:${sessionId}`);
+    }
+    if (nextStatus === 'idle') {
+      const isRootSession = !sessionParentById.value.get(sessionId);
+      if (isRootSession && !isSelectedSession) {
+        addPendingNotification(sessionId, `idle:${sessionId}`, 'idle');
+      }
     }
     pruneIdleEphemeralSessions();
     return;
@@ -6809,6 +6981,7 @@ async function startInitialization() {
       const directory = activeDirectory.value || undefined;
       await fetchPendingPermissions(directory);
       await fetchPendingQuestions(directory);
+      await fetchAllPendingNotifications(directory);
       void loadTreePath('.');
       void refreshSessionDiff();
     }
@@ -6901,6 +7074,7 @@ onMounted(() => {
       }
       if (bootstrapReady.value) {
         void reconcileSessionGraphFromScopes();
+        void fetchAllPendingNotifications(activeDirectory.value || undefined);
         return;
       }
       void fetchSessionStatus(activeDirectory.value || undefined);
@@ -6913,6 +7087,7 @@ onMounted(() => {
       sendStatus.value = 'Ready';
       void reconcileSessionGraphFromScopes();
       void fetchProviders(true);
+      void fetchAllPendingNotifications(activeDirectory.value || undefined);
     }),
   );
   globalEventUnsubscribers.push(
@@ -6943,8 +7118,19 @@ onMounted(() => {
     }),
   );
   globalEventUnsubscribers.push(
+    ge.on('permission.asked', (packet) => {
+      const request = packet as PermissionRequest;
+      addPendingNotification(request.sessionID, request.id, 'permission');
+    }),
+  );
+  globalEventUnsubscribers.push(
     sessionScope.on('permission.replied', ({ requestID }) => {
       removePermissionEntry(requestID);
+    }),
+  );
+  globalEventUnsubscribers.push(
+    ge.on('permission.replied', ({ requestID }) => {
+      removePendingNotification(requestID);
     }),
   );
   globalEventUnsubscribers.push(
@@ -6954,13 +7140,29 @@ onMounted(() => {
     }),
   );
   globalEventUnsubscribers.push(
+    ge.on('question.asked', (packet) => {
+      const request = packet as QuestionRequest;
+      addPendingNotification(request.sessionID, request.id, 'question');
+    }),
+  );
+  globalEventUnsubscribers.push(
     sessionScope.on('question.replied', ({ requestID }) => {
       removeQuestionEntry(requestID);
     }),
   );
   globalEventUnsubscribers.push(
+    ge.on('question.replied', ({ requestID }) => {
+      removePendingNotification(requestID);
+    }),
+  );
+  globalEventUnsubscribers.push(
     sessionScope.on('question.rejected', ({ requestID }) => {
       removeQuestionEntry(requestID);
+    }),
+  );
+  globalEventUnsubscribers.push(
+    ge.on('question.rejected', ({ requestID }) => {
+      removePendingNotification(requestID);
     }),
   );
   globalEventUnsubscribers.push(
@@ -6991,6 +7193,7 @@ onMounted(() => {
     const resolvedProjectId = sessionInfo.projectID || resolveProjectIdForSession(sessionInfo.id);
     if (isDelete) {
       sessionGraphStore.removeSession(sessionInfo.id, resolvedProjectId || undefined);
+      clearNotificationSession(sessionInfo.id);
       if (selectedSessionId.value === sessionInfo.id) selectedSessionId.value = '';
     } else {
       upsertSessionGraph(sessionInfo);
