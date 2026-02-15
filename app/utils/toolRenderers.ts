@@ -296,24 +296,7 @@ export function extractFileRead(
       case 'read': {
         if (status === 'completed' || status === 'error') return null;
         const readPath = helpers.resolveReadWritePath(input, metadata, state);
-        if (outputText && outputText.includes('<type>directory</type>')) {
-          const entriesContent = extractXmlTagContent(outputText, 'entries') ?? outputText;
-          return {
-            content: () =>
-              helpers.renderWorkerHtml({
-                id: `read-dir-${callId ?? Date.now().toString(36)}`,
-                code: entriesContent,
-                lang: 'text',
-                theme: 'github-dark',
-                gutterMode: 'none',
-              }),
-            variant: 'term' as const,
-            callId,
-            toolName: tool,
-            toolStatus: 'completed',
-            title: toolPrefix(tool, 'READ', readPath),
-          };
-        }
+        const isDirectory = outputText?.includes('<type>directory</type>') ?? false;
         const readLang = helpers.guessLanguageFromPath(readPath);
         const readRange = helpers.resolveReadRange(input);
         return {
@@ -326,7 +309,7 @@ export function extractFileRead(
               lineLimit: readRange.limit,
               fallbackText: outputText,
             }),
-          variant: 'code' as const,
+          variant: isDirectory ? ('term' as const) : ('code' as const),
           callId,
           toolName: tool,
           toolStatus: 'completed',
