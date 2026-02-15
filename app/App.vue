@@ -4660,30 +4660,27 @@ async function renderReadHtmlFromApi(params: {
   if (!params.path) return renderText('READ path is missing in tool payload.');
 
   const requestPath = splitFileContentDirectoryAndPath(params.path, directory);
-  const directoryHint = params.fallbackText?.includes('<type>directory</type>') ?? false;
 
-  if (directoryHint) {
-    try {
-      const listData = await opencodeApi.listFiles(credentials.baseUrl.value, {
-        directory: requestPath.directory,
-        path: requestPath.path,
-      });
-      const entries = Array.isArray(listData)
-        ? listData
-            .map((item) => {
-              if (!item || typeof item !== 'object') return null;
-              const record = item as FileNode;
-              const name = record.name ?? record.path?.split('/').pop();
-              if (!name) return null;
-              return record.type === 'directory' ? `${name}/` : name;
-            })
-            .filter((entry): entry is string => Boolean(entry))
-        : [];
+  try {
+    const listData = await opencodeApi.listFiles(credentials.baseUrl.value, {
+      directory: requestPath.directory,
+      path: requestPath.path,
+    });
+    if (Array.isArray(listData) && listData.length > 0) {
+      const entries = listData
+        .map((item) => {
+          if (!item || typeof item !== 'object') return null;
+          const record = item as FileNode;
+          const name = record.name ?? record.path?.split('/').pop();
+          if (!name) return null;
+          return record.type === 'directory' ? `${name}/` : name;
+        })
+        .filter((entry): entry is string => Boolean(entry));
       const code = entries.length > 0 ? entries.join('\n') : '(empty directory)';
       return renderText(code, 'none');
-    } catch (error) {
-      return renderText(`Directory load failed: ${toErrorMessage(error)}`, 'none');
     }
+  } catch {
+    // Not a directory, or listing failed — proceed to read as file content.
   }
 
   try {
