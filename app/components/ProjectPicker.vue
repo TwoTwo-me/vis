@@ -1,5 +1,5 @@
 <template>
-  <div v-if="open" class="modal-backdrop" @keydown.esc="$emit('close')">
+  <div v-if="open" class="modal-backdrop">
     <div class="modal" role="dialog" aria-modal="true" tabindex="0" @keydown="handleKeydown">
       <header class="modal-header">
         <div class="modal-title">Select folder</div>

@@ -446,7 +446,7 @@ const appEl = ref<HTMLDivElement | null>(null);
 const outputEl = ref<HTMLElement | null>(null);
 const inputEl = ref<HTMLElement | null>(null);
 const toolWindowCanvasEl = ref<HTMLDivElement | null>(null);
-const outputPanelRef = ref<{ panelEl: HTMLDivElement | null } | null>(null);
+const outputPanelRef = ref<{ panelEl: HTMLDivElement | null; isHistoryOpen: boolean; closeHistory: () => void } | null>(null);
 const inputPanelRef = ref<{ focus: () => void; reset: () => void } | null>(null);
 const outputPanelContainerEl = computed(() => outputPanelRef.value?.panelEl ?? undefined);
 const outputPanelScrollMode = computed<ScrollMode>(() => 'follow');
@@ -4190,6 +4190,41 @@ async function sendMessage() {
   }
 }
 
+let lastEscTime = 0;
+const DOUBLE_ESC_THRESHOLD = 500;
+
+function handleGlobalKeydown(event: KeyboardEvent) {
+  if (event.key !== 'Escape') return;
+
+  // Priority 1: Close any open modal / overlay
+  if (isSettingsOpen.value) {
+    isSettingsOpen.value = false;
+    lastEscTime = 0;
+    return;
+  }
+  if (isProjectPickerOpen.value) {
+    isProjectPickerOpen.value = false;
+    lastEscTime = 0;
+    return;
+  }
+  if (outputPanelRef.value?.isHistoryOpen) {
+    outputPanelRef.value.closeHistory();
+    lastEscTime = 0;
+    return;
+  }
+
+  // Priority 2: Double-ESC to abort
+  const now = Date.now();
+  if (now - lastEscTime < DOUBLE_ESC_THRESHOLD) {
+    lastEscTime = 0;
+    if (canAbort.value) {
+      abortSession();
+    }
+  } else {
+    lastEscTime = now;
+  }
+}
+
 async function abortSession() {
   if (!ensureConnectionReady('Stopping')) return;
   const sessionId = selectedSessionId.value;
@@ -6582,6 +6617,7 @@ function handleLogout() {
 }
 
 onMounted(() => {
+  window.addEventListener('keydown', handleGlobalKeydown);
   handleWindowResize();
   if (typeof document !== 'undefined' && 'fonts' in document) {
     void document.fonts.ready.then(() => {
@@ -6834,6 +6870,7 @@ onMounted(() => {
   );
 });
 onBeforeUnmount(() => {
+  window.removeEventListener('keydown', handleGlobalKeydown);
   window.removeEventListener('pointermove', handlePointerMove);
   window.removeEventListener('pointerup', handlePointerUp);
   window.removeEventListener('resize', handleWindowResize);

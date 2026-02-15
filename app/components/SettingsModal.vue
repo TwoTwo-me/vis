@@ -1,5 +1,5 @@
 <template>
-  <div v-if="open" class="modal-backdrop" @click.self="$emit('close')" @keydown.esc="$emit('close')">
+  <div v-if="open" class="modal-backdrop" @click.self="$emit('close')">
     <div class="modal" role="dialog" aria-modal="true" tabindex="0">
       <header class="modal-header">
         <div class="modal-title">Settings</div>

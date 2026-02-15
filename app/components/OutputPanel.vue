@@ -858,7 +858,9 @@ onBeforeUnmount(() => {
   if (thinkingTimer !== undefined) window.clearInterval(thinkingTimer);
 });
 
-defineExpose({ panelEl });
+const isHistoryOpen = computed(() => activeHistoryRoot.value !== null);
+
+defineExpose({ panelEl, isHistoryOpen, closeHistory });
 </script>
 
 <style scoped>
