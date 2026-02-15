@@ -215,7 +215,6 @@ import {
   watch,
 } from 'vue';
 import { bundledThemes } from 'shiki/bundle/web';
-import { FitAddon } from '@xterm/addon-fit';
 import { Terminal } from '@xterm/xterm';
 import InputPanel from './components/InputPanel.vue';
 import ImageViewer from './components/ImageViewer.vue';
@@ -404,7 +403,6 @@ type PtyInfo = {
 type ShellSession = {
   pty: PtyInfo;
   terminal: Terminal;
-  fitAddon: FitAddon;
   socket?: WebSocket;
 };
 
@@ -502,7 +500,7 @@ const composerDraftTabId =
     ? crypto.randomUUID()
     : `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const shellSessionsByPtyId = new Map<string, ShellSession>();
-const pendingShellFits = new Map<string, number>();
+const pendingShellFits = new Set<string>();
 const ptyMetaDecoder = new TextDecoder();
 let floatingExtentResizeObserver: ResizeObserver | null = null;
 let floatingExtentObservedEl: HTMLDivElement | null = null;
@@ -3525,7 +3523,8 @@ async function updatePtySize(ptyId: string, rows: number, cols: number, director
 function ensureShellWindow(pty: PtyInfo) {
   if (shellSessionsByPtyId.has(pty.id)) return;
   const key = `shell:${pty.id}`;
-  const randomPosition = getRandomWindowPosition();
+  const { width, height } = getTerminalWindowSize();
+  const randomPosition = getRandomWindowPosition({ width, height });
   fw.open(key, {
     component: ShellContent,
     props: { shellId: pty.id },
@@ -3534,12 +3533,16 @@ function ensureShellWindow(pty: PtyInfo) {
     scroll: 'none',
     color: '#a855f7',
     title: pty.title || 'Shell',
+    width,
+    height,
     x: randomPosition.x,
     y: randomPosition.y,
     expiry: Infinity,
     onResize: () => scheduleShellFit(pty.id),
   });
   const terminal = new Terminal({
+    cols: TERM_COLUMNS,
+    rows: TERM_ROWS,
     fontFamily: TERM_FONT_FAMILY,
     fontSize: TERM_FONT_SIZE_PX,
     lineHeight: TERM_LINE_HEIGHT,
@@ -3551,12 +3554,9 @@ function ensureShellWindow(pty: PtyInfo) {
       selectionBackground: 'rgba(148, 163, 184, 0.3)',
     },
   });
-  const fitAddon = new FitAddon();
-  terminal.loadAddon(fitAddon);
   shellSessionsByPtyId.set(pty.id, {
     pty,
     terminal,
-    fitAddon,
   });
   nextTick(() => {
     const host = toolWindowCanvasEl.value?.querySelector(
@@ -3564,42 +3564,134 @@ function ensureShellWindow(pty: PtyInfo) {
     ) as HTMLElement | null;
     if (!host) return;
     terminal.open(host);
-    scheduleShellFit(pty.id);
     connectShellSocket(pty.id);
+    // Wait for first paint so xterm has rendered cell dimensions
+    requestAnimationFrame(() => {
+      resizeWindowToFitTerminal(key, terminal, host);
+    });
   });
 }
 
-function scheduleShellFitAll() {
+function resizeWindowToFitTerminal(key: string, terminal: Terminal, _host: HTMLElement) {
+  const cell = getTerminalCellSize(terminal);
+  if (!cell) return;
+
+  // Measure scrollbar width
+  const viewport = terminal.element?.querySelector('.xterm-viewport') as HTMLElement | null;
+  const scrollbarWidth = viewport ? viewport.offsetWidth - viewport.clientWidth : 0;
+
+  // Terminal content area needed
+  const contentWidth = terminal.cols * cell.width + scrollbarWidth;
+  const contentHeight = terminal.rows * cell.height;
+
+  // Window chrome from known CSS values (constant-based, not dynamic measurement):
+  //   .floating-window         border: 1px * 2 sides = 2px each direction
+  //   .floating-window-titlebar height: 22px + border-bottom: 1px = 23px
+  //   .floating-window-body    padding: 2px 4px → 4px V, 8px H
+  const chromeX = TERM_WINDOW_BORDER_PX + 2 * TERM_INNER_PADDING_X_PX; // 2 + 8 = 10
+  const chromeY = TERM_WINDOW_BORDER_PX + TERM_TITLEBAR_HEIGHT_PX + 1 + TERM_INNER_PADDING_Y_PX; // 2 + 22 + 1 + 4 = 29
+
+  const newWidth = Math.ceil(contentWidth + chromeX);
+  const newHeight = Math.ceil(contentHeight + chromeY);
+
+  fw.updateOptions(key, { width: newWidth, height: newHeight });
+
+  // Notify server of terminal dimensions
+  const session = shellSessionsByPtyId.get(key.replace('shell:', ''));
+  if (session) notifyPtySize(session);
+}
+
+  function scheduleShellFitAll() {
   shellSessionsByPtyId.forEach((_, ptyId) => {
     scheduleShellFit(ptyId);
   });
 }
 
+function getTerminalCellSize(terminal: Terminal): { width: number; height: number } | null {
+  // Prefer measuring from rendered screen (most accurate)
+  const termEl = terminal.element;
+  if (termEl && terminal.cols > 0 && terminal.rows > 0) {
+    const screen = termEl.querySelector('.xterm-screen');
+    if (screen) {
+      const rect = screen.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) {
+        return { width: rect.width / terminal.cols, height: rect.height / terminal.rows };
+      }
+    }
+  }
+  // Fallback: xterm's internal renderer dimensions
+  const core = (terminal as any)._core;
+  const dims = core?._renderService?.dimensions?.css?.cell;
+  if (dims?.width > 0 && dims?.height > 0) {
+    return { width: dims.width, height: dims.height };
+  }
+  return null;
+}
+
+function fitTerminalToContainer(session: ShellSession): boolean {
+  const termEl = session.terminal.element;
+  if (!termEl?.isConnected) return false;
+  const parent = termEl.parentElement;
+  if (!parent) return false;
+  const parentRect = parent.getBoundingClientRect();
+  if (parentRect.width <= 0 || parentRect.height <= 0) return false;
+
+  const cell = getTerminalCellSize(session.terminal);
+  if (!cell) return false;
+
+  // Subtract scrollbar width from available horizontal space
+  const viewport = termEl.querySelector('.xterm-viewport') as HTMLElement | null;
+  const scrollbarWidth = viewport ? viewport.offsetWidth - viewport.clientWidth : 0;
+
+  const cols = Math.max(2, Math.floor((parentRect.width - scrollbarWidth) / cell.width));
+  const rows = Math.max(1, Math.floor(parentRect.height / cell.height));
+  if (cols !== session.terminal.cols || rows !== session.terminal.rows) {
+    session.terminal.resize(cols, rows);
+  }
+  return true;
+}
+
+function notifyPtySize(session: ShellSession) {
+  const { rows, cols } = session.terminal;
+  if (rows > 0 && cols > 0) {
+    const directory = session.pty.cwd || activeDirectory.value || undefined;
+    updatePtySize(session.pty.id, rows, cols, directory).catch((error) => {
+      log('PTY resize failed', error);
+    });
+  }
+}
+
 function scheduleShellFit(ptyId: string) {
-  const existing = pendingShellFits.get(ptyId);
-  if (existing) cancelAnimationFrame(existing);
-  const handle = requestAnimationFrame(() => {
+  if (pendingShellFits.has(ptyId)) return;
+  pendingShellFits.add(ptyId);
+  nextTick(() => {
     pendingShellFits.delete(ptyId);
     const session = shellSessionsByPtyId.get(ptyId);
     if (!session) return;
-    const terminalElement = session.terminal.element;
-    if (!terminalElement || !terminalElement.isConnected) return;
-    try {
-      session.fitAddon.fit();
-    } catch (error) {
-      log('PTY fit failed', error);
-      return;
+
+    let prevCols = -1;
+    let prevRows = -1;
+    let attempts = 0;
+
+    function tick() {
+      if (attempts >= 30 || !session.terminal.element?.isConnected) {
+        notifyPtySize(session);
+        return;
+      }
+      attempts++;
+      fitTerminalToContainer(session);
+      const { cols, rows } = session.terminal;
+      if (cols === prevCols && rows === prevRows) {
+        notifyPtySize(session);
+        return;
+      }
+      prevCols = cols;
+      prevRows = rows;
+      requestAnimationFrame(tick);
     }
-    const rows = session.terminal.rows;
-    const cols = session.terminal.cols;
-    if (rows > 0 && cols > 0) {
-      const directory = session.pty.cwd || activeDirectory.value || undefined;
-      updatePtySize(ptyId, rows, cols, directory).catch((error) => {
-        log('PTY resize failed', error);
-      });
-    }
+
+    tick();
   });
-  pendingShellFits.set(ptyId, handle);
 }
 
 function connectShellSocket(ptyId: string) {
@@ -3664,8 +3756,6 @@ function connectShellSocket(ptyId: string) {
 function removeShellWindow(ptyId: string, options?: { kill?: boolean }) {
   const session = shellSessionsByPtyId.get(ptyId);
   if (!session) return;
-  const pending = pendingShellFits.get(ptyId);
-  if (pending) cancelAnimationFrame(pending);
   pendingShellFits.delete(ptyId);
   session.socket?.close();
   session.terminal.dispose();
