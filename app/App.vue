@@ -876,15 +876,26 @@ const topPanelTreeData = computed<TopPanelWorktree[]>(() => {
 
           const branch = sessionGraphStore.getVcsInfo(sandboxDirectory)?.branch;
           const latestUpdated = sessionsForSandbox[0]?.timeUpdated ?? 0;
+          const oldestCreated = roots.length > 0
+            ? Math.min(...roots.map((s) => s.time?.created ?? Infinity))
+            : 0;
 
           return {
             directory: sandboxDirectory,
             branch,
             sessions: sessionsForSandbox,
             latestUpdated,
+            oldestCreated,
           };
         })
-        .sort((a, b) => b.latestUpdated - a.latestUpdated);
+        .sort((a, b) => {
+          // Primary sandbox (same directory as worktree) comes first
+          const aIsPrimary = a.directory === worktreeDirectory;
+          const bIsPrimary = b.directory === worktreeDirectory;
+          if (aIsPrimary !== bIsPrimary) return aIsPrimary ? -1 : 1;
+          // Then by creation time descending (newest first)
+          return (b.oldestCreated || 0) - (a.oldestCreated || 0);
+        });
 
       const latestSandboxUpdated = sandboxEntries
         .flatMap((sandbox) => sandbox.sessions)
@@ -902,7 +913,12 @@ const topPanelTreeData = computed<TopPanelWorktree[]>(() => {
         latestUpdated: latestSandboxUpdated,
       };
     })
-    .sort((a, b) => b.latestUpdated - a.latestUpdated);
+    .sort((a, b) => {
+      // "/" worktree always at the bottom
+      if (a.directory === '/' && b.directory !== '/') return 1;
+      if (b.directory === '/' && a.directory !== '/') return -1;
+      return (a.name || a.label).localeCompare(b.name || b.label);
+    });
 
   return worktreeEntries;
 });
