@@ -126,7 +126,7 @@
             >
               <template #value="{ value: id }">
                 <div class="model-button-label">
-                  <span v-if="findModelOption(id)?.providerLabel ?? findModelOption(id)?.providerID" class="model-button-path">{{ findModelOption(id)?.providerLabel ?? findModelOption(id)?.providerID }}</span>
+                  <span v-if="findModelOption(id)?.providerLabel ?? findModelOption(id)?.providerID" class="model-button-provider">{{ findModelOption(id)?.providerLabel ?? findModelOption(id)?.providerID }}</span>
                   <span class="model-button-name">{{ findModelOption(id)?.displayName }}</span>
                 </div>
               </template>
@@ -899,6 +899,7 @@ const inputMessageStyle = computed(() => {
 }
 
 .model-button-label {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: 1px;
@@ -907,19 +908,21 @@ const inputMessageStyle = computed(() => {
   overflow: hidden;
   line-height: 1.15;
   text-align: left;
+  align-self: flex-start;
+}
+
+.model-button-provider {
+  position: fixed;
+  font-size: 9px;
+  color: #94a3b8;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  transform: translate(-3px, -11px);
 }
 
 .model-button-name {
   font-size: 12px;
   color: #e2e8f0;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-}
-
-.model-button-path {
-  font-size: 9px;
-  color: #94a3b8;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;

@@ -373,6 +373,7 @@ defineExpose({ moveHighlight, selectHighlighted });
   display: block;
   width: 100%;
   height: 0;
+  visibility: hidden;
   overflow: hidden;
 }
 
