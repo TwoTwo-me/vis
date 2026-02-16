@@ -3,7 +3,7 @@
     <div class="top-row">
       <div class="top-left flex items-baseline gap-2">
         <div class="text-lg">Vis</div>
-        <div class="text-xs font-normal">OpenCode Visualizer</div>
+        <div class="text-xs font-normal hidden lg:block">OpenCode Visualizer</div>
       </div>
       <div class="top-center">
         <button
@@ -22,8 +22,9 @@
           :label="dropdownLabel"
           placeholder="Select session"
           auto-close
-          :popup-style="{ minWidth: '420px', width: 'min(680px, 90vw)', maxWidth: '90vw' }"
-          @select="onTreeSelect"
+      :popup-style="{ minWidth: '420px', width: 'min(680px, 90vw)', maxWidth: '90vw' }"
+      popup-class="max-lg:left-0! max-lg:w-screen! max-lg:min-w-0! max-lg:max-w-none!"
+      @select="onTreeSelect"
         >
           <template #label>
             <span v-if="selectedDisplay" class="selected-label">
@@ -1044,4 +1045,5 @@ function handleOpenDirectory(close: () => void) {
   gap: 8px;
   color: #e2e8f0;
 }
+
 </style>
