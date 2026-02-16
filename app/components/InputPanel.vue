@@ -29,7 +29,7 @@
         ref="textareaRef"
         v-model="messageValue"
         class="input-textarea"
-        :disabled="props.disabled"
+        :disabled="false"
         placeholder="Send a message..."
         @keydown="handleKeydown"
         @paste="handlePaste"
