@@ -4537,6 +4537,9 @@ watch(
 );
 
 watch(selectedModel, () => {
+  // During bootstrap, modelOptions may not be loaded yet.
+  // Skip normalization; fetchProviders will handle it once models are available.
+  if (modelOptions.value.length === 0) return;
   const selectedInfo = modelOptions.value.find((model) => model.id === selectedModel.value);
   const nextThinkingOptions = buildThinkingOptions(selectedInfo?.variants);
   const sameThinking =
