@@ -772,7 +772,7 @@ const inputMessageStyle = computed(() => {
   background-color: rgba(15, 23, 42, 0.92);
   background-image: linear-gradient(var(--agent-tint, transparent), var(--agent-tint, transparent));
   border: 1px solid #334155;
-  border-radius: 20px;
+  border-radius: 12px;
   box-sizing: border-box;
   box-shadow: 0 12px 32px rgba(2, 6, 23, 0.45);
 }
