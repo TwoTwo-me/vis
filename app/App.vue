@@ -731,7 +731,6 @@ let graphForWrite: ReturnType<typeof createSessionGraphStore> = sessionGraphStor
 let rebuildingGraph = false;
 const sessionGraphVersion = ref(0);
 const bootstrapReady = ref(false);
-const pendingChildFetchKeys = new Set<string>();
 const providers = ref<ProviderInfo[]>([]);
 const agents = ref<AgentInfo[]>([]);
 const commands = ref<CommandInfo[]>([]);
@@ -2140,10 +2139,6 @@ function setSessions(list: SessionInfo[], directoryContext?: string) {
   markSessionGraphChanged();
 }
 
-function clearSessions() {
-  selectedSessionId.value = '';
-}
-
 function upsertSessionGraph(info: SessionInfo) {
   graphForWrite.upsertSession(info, {
     projectIDHint: selectedProjectId.value || undefined,
@@ -2156,51 +2151,6 @@ function upsertSessionGraph(info: SessionInfo) {
 function removeSessionFromGraph(sessionId: string) {
   graphForWrite.removeSession(sessionId, selectedProjectId.value || undefined);
   markSessionGraphChanged();
-}
-
-/**
- * Fetch all descendant sessions for the given root session via the
- * `/session/{sessionID}/children` API and register them into
- * `sessionParentById` so that `allowedSessionIds` includes them.
- * This is the primary fix for child sessions not being recognised
- * after initial page load (the `GET /session?directory=…` endpoint
- * only returns sessions whose directory matches, so sub-agent
- * sessions with a different—or missing—directory are omitted).
- */
-async function fetchSessionChildren(rootSessionId: string, directory?: string, projectID?: string) {
-  const instanceDirectory = (directory || activeDirectory.value || '').trim();
-  const fetchKey = `${instanceDirectory}:${rootSessionId}`;
-  if (pendingChildFetchKeys.has(fetchKey)) return;
-  pendingChildFetchKeys.add(fetchKey);
-  try {
-    const data = (await opencodeApi.getSessionChildren(
-      credentials.baseUrl.value,
-      rootSessionId,
-      undefined,
-      { instanceDirectory: instanceDirectory || undefined },
-    )) as SessionInfo[];
-    if (!Array.isArray(data) || data.length === 0) return;
-    const resolvedProjectID =
-      projectID ||
-      resolveProjectIdForSession(rootSessionId) ||
-      resolveProjectIdForDirectory(instanceDirectory || undefined);
-    for (const child of data) {
-      if (!child || typeof child.id !== 'string') continue;
-      const parentId = typeof child.parentID === 'string' ? child.parentID : rootSessionId;
-      graphForWrite.upsertSession({ ...child, parentID: parentId }, {
-        projectIDHint: resolvedProjectID || undefined,
-        directoryHint: instanceDirectory || undefined,
-        retention: 'ephemeral',
-      });
-    }
-    markSessionGraphChanged();
-  } catch (error) {
-    // Non-critical: child list unavailable. SSE events will
-    // register children as they arrive.
-    log('fetchSessionChildren failed', error);
-  } finally {
-    pendingChildFetchKeys.delete(fetchKey);
-  }
 }
 
 async function fetchHomePath() {
@@ -2314,28 +2264,6 @@ function projectSessionDirectories(project?: ProjectInfo) {
   );
 }
 
-async function fetchSessions(
-  options: {
-    directory?: string;
-    instanceDirectory?: string;
-    roots?: boolean;
-    search?: string;
-    limit?: number;
-  } = {},
-) {
-  const contextDirectory = options.instanceDirectory ?? options.directory ?? activeDirectory.value;
-  const list = await listSessionsByDirectory(options);
-  if (options.instanceDirectory && activeDirectory.value) {
-    if (normalizeDirectory(options.instanceDirectory) !== normalizeDirectory(activeDirectory.value)) {
-      return;
-    }
-  }
-  if (options.directory && activeDirectory.value && options.directory !== activeDirectory.value) {
-    return;
-  }
-  setSessions(list, contextDirectory);
-}
-
 async function listSessionsByDirectory(
   options: {
     directory?: string;
@@ -2354,19 +2282,6 @@ async function listSessionsByDirectory(
     sessionError.value = message;
     return [] as SessionInfo[];
   }
-}
-
-function refreshSessionsForDirectory(directory?: string) {
-  if (!directory) {
-    clearSessions();
-    return Promise.resolve();
-  }
-  return fetchSessions({
-    directory,
-    instanceDirectory: directory,
-    roots: true,
-    limit: ROOT_SESSION_BOOTSTRAP_LIMIT,
-  });
 }
 
 async function fetchWorktrees(directory?: string) {
@@ -2548,7 +2463,6 @@ async function createNewSession(): Promise<SessionInfo | undefined> {
       }
       if (data.directory) activeDirectory.value = data.directory;
     }
-    void refreshSessionsForDirectory(activeDirectory.value || undefined);
     return data;
   } catch (error) {
     sessionError.value = `Session create failed: ${toErrorMessage(error)}`;
@@ -2622,7 +2536,6 @@ async function deleteSession(sessionId: string) {
     clearNotificationSession(sessionId);
     removeSessionFromGraph(sessionId);
     deleteSessionStatus(sessionId, selectedProjectId.value);
-    void refreshSessionsForDirectory(activeDirectory.value || undefined);
     if (!selectedSessionId.value && pickPreferredSessionId(filteredSessions.value) === '') {
       await createNewSession();
     }
@@ -2647,7 +2560,6 @@ async function archiveSession(sessionId: string) {
       upsertSessionGraph(data);
     }
     if (selectedSessionId.value === sessionId) selectedSessionId.value = '';
-    void refreshSessionsForDirectory(activeDirectory.value || undefined);
     if (!selectedSessionId.value && pickPreferredSessionId(filteredSessions.value) === '') {
       await createNewSession();
     }
@@ -2676,7 +2588,6 @@ async function handleForkMessage(payload: { sessionId: string; messageId: string
       }
       if (data.directory) activeDirectory.value = data.directory;
       selectedSessionId.value = data.id;
-      void refreshSessionsForDirectory(data.directory || activeDirectory.value || undefined);
     }
     sendStatus.value = 'Forked.';
   } catch (error) {
@@ -2697,7 +2608,6 @@ async function handleRevertMessage(payload: { sessionId: string; messageId: stri
     );
     sendStatus.value = 'Reverted.';
     if (selectedSessionId.value === payload.sessionId) reloadSelectedSessionState();
-    void refreshSessionsForDirectory(activeDirectory.value || undefined);
   } catch (error) {
     sessionError.value = `Session revert failed: ${toErrorMessage(error)}`;
   }
@@ -4359,12 +4269,8 @@ watch(
       void fetchWorktrees(pd || undefined);
     }
 
-    const directoryToRefresh = ad || pd || undefined;
-    void refreshSessionsForDirectory(directoryToRefresh);
-
     if (adChanged && ad) {
       void fetchCommands(ad);
-      void rebuildSessionGraph();
     }
   },
   { immediate: true },
@@ -4428,13 +4334,6 @@ async function reloadSelectedSessionState() {
   if (selectedSessionId.value && isBootstrapping.value && !activeDirectory.value) {
     return;
   }
-  const selected = sessions.value.find((session) => session.id === selectedSessionId.value);
-  if (selected?.projectID) {
-    const directory = selected.directory || activeDirectory.value || projectDirectory.value;
-    if (directory && graphForWrite.setSandboxProjectID(directory, selected.projectID)) {
-      markSessionGraphChanged();
-    }
-  }
   fw.closeAll({ exclude: (key) => key.startsWith('shell:') });
   msg.reset();
   resetFollow();
@@ -4458,23 +4357,8 @@ async function reloadSelectedSessionState() {
     const directory = activeDirectory.value || undefined;
     void fetchPendingPermissions(directory);
     void fetchPendingQuestions(directory);
-    // Fetch child sessions so allowedSessionIds includes them.
-    // When sessionParentById updates, the watch on allowedSessionIds
-    // will automatically re-trigger reloadTodosForAllowedSessions.
-    void fetchSessionChildren(selectedSessionId.value, directory, selectedProjectId.value || undefined);
   }
   nextTick(() => inputPanelRef.value?.focus());
-}
-
-async function fetchChildrenForActiveSessions() {
-  const activeSessions = graphForWrite.listActiveSessions();
-  await Promise.all(
-    activeSessions.map(async (session) => {
-      const directory = session.directory?.trim();
-      if (!directory) return;
-      await fetchSessionChildren(session.id, directory, session.projectID);
-    }),
-  );
 }
 
 function pruneIdleEphemeralSessions() {
@@ -4586,11 +4470,6 @@ watch(
 function log(..._args: unknown[]) {}
 
 const shikiTheme = ref('github-dark');
-
-setInterval(() => {
-  pruneIdleEphemeralSessions();
-  void fetchChildrenForActiveSessions();
-}, 15_000);
 
 
 
@@ -6325,8 +6204,6 @@ function applySessionStatusEvent(
       updateReasoningExpiry(sessionId, nextStatus);
     }
     if (nextStatus === 'busy') {
-      const session = graphForWrite.getSession(sessionId, projectId);
-      void fetchSessionChildren(sessionId, session?.directory || activeDirectory.value || undefined, projectId);
       removePendingNotification(`idle:${sessionId}`);
     }
     if (nextStatus === 'idle') {
@@ -6341,8 +6218,6 @@ function applySessionStatusEvent(
   if (status.type !== 'retry') return;
 
   setSessionStatus(sessionId, 'retry', projectId);
-  const session = graphForWrite.getSession(sessionId, projectId);
-  void fetchSessionChildren(sessionId, session?.directory || activeDirectory.value || undefined, projectId);
   if (!isSelectedSession || !isAllowedSession) return;
 
   updateReasoningExpiry(sessionId, 'busy');
