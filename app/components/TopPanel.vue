@@ -148,7 +148,10 @@
               </div>
 
               <div class="tree-footer">
-                <button type="button" class="tree-footer-button" @click="handleOpenDirectory(close)">Open</button>
+                <button type="button" class="tree-footer-button" @click="handleOpenDirectory(close)">
+                  <Icon icon="lucide:folder-open" :width="14" :height="14" />
+                  Open project…
+                </button>
               </div>
             </div>
           </template>
@@ -888,6 +891,10 @@ function handleOpenDirectory(close: () => void) {
 
 .tree-footer-button {
   width: 100%;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
   border: 1px solid #334155;
   border-radius: 8px;
   background: #111a2c;
