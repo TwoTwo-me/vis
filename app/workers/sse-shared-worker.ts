@@ -10,6 +10,7 @@ import type {
 } from '../types/sse';
 import { createNotificationManager } from '../utils/notificationManager';
 import {
+  getCurrentProject,
   getSessionStatusMap,
   getVcsInfo,
   listProjects,
@@ -802,41 +803,41 @@ async function bootstrapState(state: ConnectionState): Promise<void> {
   const builder = createStateBuilder();
   const run = queueOpencodeTask(state, async () => {
     const projects = asObjectArray<Record<string, unknown>>(await listProjects());
-    const directoriesByProjectId = new Map<string, string>();
+    const directories = new Set<string>(['']);
 
-    const syncDirectoryState = async (directory: string, projectId: string) => {
+    const syncDirectoryState = async (directory: string) => {
       const [sessions, statuses] = await Promise.all([
         listSessions({ directory, roots: true }),
         getSessionStatusMap(directory),
       ]);
       builder.applySessions(asObjectArray(sessions) as Parameters<typeof builder.applySessions>[0]);
-      builder.applyStatuses(asStatusMap(statuses), projectId);
+      builder.applyStatuses(asStatusMap(statuses));
     };
 
-    projects.forEach((project) => {
-      const projectId = asString(project.id)?.trim() ?? '';
-      const worktree = normalizeDirectory(asString(project.worktree) ?? '');
-      if (!projectId || !worktree) return;
+    builder.applyProjects(projects as Parameters<typeof builder.applyProjects>[0]);
 
-      builder.processProjectUpdated(project as Parameters<typeof builder.processProjectUpdated>[0]);
-      directoriesByProjectId.set(worktree, projectId);
+    projects.forEach((project) => {
+      const worktree = normalizeDirectory(asString(project.worktree) ?? '');
+      if (worktree) {
+        directories.add(worktree);
+      }
 
       const sandboxes = asStringArray(project.sandboxes) ?? [];
       sandboxes.forEach((sandbox) => {
         const directory = normalizeDirectory(sandbox);
         if (!directory) return;
-        directoriesByProjectId.set(directory, projectId);
+        directories.add(directory);
       });
     });
 
     await Promise.all(
-      Array.from(directoriesByProjectId.entries()).map(async ([directory, projectId]) => {
-        await syncDirectoryState(directory, projectId);
+      Array.from(directories).map(async (directory) => {
+        await syncDirectoryState(directory);
       }),
     );
 
     await Promise.all(
-      Array.from(directoriesByProjectId.keys()).map(async (directory) => {
+      Array.from(directories).map(async (directory) => {
         const raw = await getVcsInfo(directory).catch(() => null);
         const vcsInfo = asRecord(raw);
         if (!vcsInfo) return;
@@ -972,6 +973,35 @@ function handleMessage(port: MessagePort, event: MessageEvent<TabToWorkerMessage
   if (!key) return;
   const state = connections.get(key);
   if (!state) return;
+
+  if (message.type === 'load-sessions') {
+    const directory = normalizeDirectory(message.directory);
+    if (!directory) return;
+
+    void queueOpencodeTask(state, async () => {
+      const [rawSessions, rawStatuses] = await Promise.all([
+        listSessions({ directory, roots: true }),
+        getSessionStatusMap(directory),
+      ]);
+
+      const sessions = asObjectArray(rawSessions) as Parameters<
+        typeof state.stateBuilder.applySessions
+      >[0];
+      state.stateBuilder.applySessions(sessions);
+
+      const projectIds = new Set<string>();
+      for (const session of sessions) {
+        const pid = session.projectID?.trim();
+        if (pid) projectIds.add(pid);
+      }
+
+      state.stateBuilder.applyStatuses(asStatusMap(rawStatuses));
+      for (const projectId of projectIds) {
+        emitProjectUpdated(state, projectId);
+      }
+    }).catch(() => {});
+    return;
+  }
 
   if (message.type === 'selection.active') {
     const parsed = parseSessionKey(message.key);
