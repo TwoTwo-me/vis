@@ -12,6 +12,7 @@ type RenderRequest = {
   grepPattern?: string;
   lineOffset?: number;
   lineLimit?: number;
+  files?: string[];
 };
 
 type RenderResponse =

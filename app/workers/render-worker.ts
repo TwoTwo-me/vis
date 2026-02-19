@@ -16,6 +16,7 @@ type RenderRequest = {
   grepPattern?: string;
   lineOffset?: number;
   lineLimit?: number;
+  files?: string[];
 };
 
 type RenderResponse =
@@ -29,6 +30,9 @@ type DiffRow = {
 
 type Highlighter = Awaited<ReturnType<typeof createHighlighter>>;
 type MarkdownShikiOptions = MarkdownItShikiSetupOptions & { langAlias?: Record<string, string> };
+type MarkdownRenderEnv = {
+  fileSet?: Set<string>;
+};
 
 let highlighterPromise: Promise<Awaited<ReturnType<typeof createHighlighter>>> | null = null;
 let cachedTheme = '';
@@ -828,6 +832,23 @@ function getMarkdownIt(highlighter: Highlighter, theme: string) {
       return `<div class="md-code-block">${renderedFence}<button class="md-copy-btn" type="button" aria-label="Copy code">COPY</button><div class="md-copied-indicator" aria-hidden="true">✓ Copied</div></div>`;
     };
 
+    const defaultCodeInline =
+      cachedMd.renderer.rules.code_inline ??
+      function (tokens, idx, options, _env, self) {
+        return self.renderToken(tokens, idx, options);
+      };
+
+    cachedMd.renderer.rules.code_inline = function (tokens, idx, options, env, self) {
+      const fileSet = (env as MarkdownRenderEnv | undefined)?.fileSet;
+      const token = tokens[idx];
+      const ref = token.content?.trim() ?? '';
+      if (fileSet && ref && fileSet.has(ref)) {
+        token.attrSet('data-file-ref', ref);
+        token.attrJoin('class', 'file-ref');
+      }
+      return defaultCodeInline(tokens, idx, options, env, self);
+    };
+
     const shikiHighlight = cachedMd.options.highlight;
     cachedMd.options.highlight = function (code, lang, attrs) {
       try {
@@ -847,7 +868,9 @@ async function renderMarkdownHtml(request: RenderRequest): Promise<string> {
   const highlighter = await getHighlighter(request.theme);
   const { md, shikiOptions } = getMarkdownIt(highlighter, request.theme);
   shikiOptions.langAlias = await resolveMarkdownLangAliases(highlighter, request.code);
-  const rendered = md.render(request.code);
+  const env: MarkdownRenderEnv = {};
+  if (request.files?.length) env.fileSet = new Set(request.files);
+  const rendered = md.render(request.code, env);
   return `<div class="markdown-host">${rendered}</div>`;
 }
 
