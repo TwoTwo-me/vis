@@ -71,30 +71,6 @@ function hasSandbox(project: ProjectState | undefined, directory: string): boole
   return Boolean(project.sandboxes[directory]);
 }
 
-function matchProjectUpdate(
-  project: ProjectState | undefined,
-  payload: ProjectUpdatePayload,
-): boolean {
-  if (!project) return false;
-  if (payload.directory !== undefined && project.worktree !== payload.directory) return false;
-  if (payload.name !== undefined && project.name !== payload.name) return false;
-
-  if (payload.icon) {
-    if (payload.icon.url !== undefined && project.icon?.url !== payload.icon.url) return false;
-    if (payload.icon.override !== undefined && project.icon?.override !== payload.icon.override) {
-      return false;
-    }
-    if (payload.icon.color !== undefined && project.icon?.color !== payload.icon.color)
-      return false;
-  }
-
-  if (payload.commands?.start !== undefined && project.commands?.start !== payload.commands.start) {
-    return false;
-  }
-
-  return true;
-}
-
 export function useOpenCodeApi(projects: ProjectsMap | Ref<ProjectsMap>) {
   const pendingCount = ref(0);
   const pending = computed(() => pendingCount.value > 0);
@@ -215,9 +191,7 @@ export function useOpenCodeApi(projects: ProjectsMap | Ref<ProjectsMap>) {
   async function updateProject(projectId: string, patch: ProjectUpdatePayload): Promise<unknown> {
     return withPending(async () => {
       const normalizedProjectId = requireProjectId(projectId);
-      const result = await opencodeApi.updateProject(normalizedProjectId, patch);
-      await waitWithRetry((state) => matchProjectUpdate(state[normalizedProjectId], patch));
-      return result;
+      return await opencodeApi.updateProject(normalizedProjectId, patch);
     });
   }
 
