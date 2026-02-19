@@ -47,7 +47,6 @@ export type SandboxState = {
 export type ProjectState = {
   id: string;
   name?: string;
-  color?: string;
   icon?: {
     url?: string;
     override?: string;

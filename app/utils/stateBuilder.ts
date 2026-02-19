@@ -47,7 +47,7 @@ function normalizeDirectory(value?: string) {
   return normalized || '/';
 }
 
-function resolveProjectColorHex(raw?: string): string | undefined {
+export function resolveProjectColorHex(raw?: string): string | undefined {
   if (!raw) return undefined;
   const trimmed = raw.trim();
   return PROJECT_COLOR_HEX[trimmed] ?? trimmed;
@@ -91,11 +91,6 @@ function sanitizeDirectoryList(value: unknown): string[] {
     result.add(normalized);
   });
   return Array.from(result);
-}
-
-function projectColor(project: ProjectInfo): string | undefined {
-  const maybe = project as ProjectInfo & { color?: string };
-  return resolveProjectColorHex(maybe.color ?? project.icon?.color);
 }
 
 export function createStateBuilder() {
@@ -476,12 +471,6 @@ export function createStateBuilder() {
     const nextName = project.name?.trim() || undefined;
     if (target.name !== nextName) {
       target.name = nextName;
-      changed = true;
-    }
-
-    const nextColor = projectColor(project);
-    if (target.color !== nextColor) {
-      target.color = nextColor;
       changed = true;
     }
 

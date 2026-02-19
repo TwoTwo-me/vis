@@ -292,6 +292,7 @@ import { useSessionSelection } from './composables/useSessionSelection';
 import { useSubagentWindows } from './composables/useSubagentWindows';
 import { renderWorkerHtml } from './utils/workerRenderer';
 import type { MessagePart, ReasoningPart, ToolPart } from './types/sse';
+import { resolveProjectColorHex } from './utils/stateBuilder';
 import {
   extractFileRead as extractToolFileRead,
   extractPatch as extractToolPatch,
@@ -492,7 +493,6 @@ type ProjectInfo = {
   id: string;
   worktree?: string;
   sandboxes?: string[];
-  color?: string;
   name?: string;
   icon?: { url?: string; override?: string; color?: string };
   commands?: { start?: string };
@@ -710,7 +710,7 @@ const sessionParentById = computed(() => {
 
 const currentProjectColor = computed(() => {
   const project = serverState.projects[selectedProjectId.value];
-  return project?.color;
+  return resolveProjectColorHex(project?.icon?.color);
 });
 
 const reasoning = useReasoningWindows({
@@ -874,7 +874,7 @@ const topPanelTreeData = computed<TopPanelWorktree[]>(() => {
         label: replaceHomePrefix(worktreeDirectory),
         name,
         projectId: project.id,
-        projectColor: project.color,
+        projectColor: resolveProjectColorHex(project.icon?.color),
         sandboxes: sandboxEntries,
         latestUpdated: latestSandboxUpdated,
       };
@@ -3188,7 +3188,7 @@ function formatSessionGraphDump(): string {
     lines.push(`PROJECT ${project.id}`);
     lines.push(`  worktree: ${project.worktree || '-'}`);
     if (project.name) lines.push(`  name: ${project.name}`);
-    if (project.color) lines.push(`  color: ${project.color}`);
+    if (project.icon?.color) lines.push(`  color: ${project.icon.color}`);
     lines.push(
       `  time: created=${fmtTime(project.time?.created)} updated=${fmtTime(project.time?.updated)} initialized=${fmtTime(project.time?.initialized)}`,
     );
