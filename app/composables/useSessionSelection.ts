@@ -1,6 +1,7 @@
 import { computed, ref, type Ref } from 'vue';
 import type { ProjectState } from '../types/worker-state';
 import { createSessionKey, parseSessionKey } from '../utils/sessionKey';
+import { waitForState } from '../utils/waitForState';
 
 type CreateSessionFn = (projectId: string) => Promise<{ id: string; projectId: string }>;
 
@@ -113,19 +114,16 @@ export function useSessionSelection(
       return;
     }
 
-    const nextProject = projectMap.value[nextProjectId];
-    if (!nextProject) {
-      await ensureSession();
-      return;
-    }
-
-    const exists = Object.values(nextProject.sandboxes).some((sandbox) =>
-      Boolean(sandbox.sessions[nextSessionId]),
+    await waitForState(
+      () => projectMap.value,
+      (projects) => {
+        const nextProject = projects[nextProjectId];
+        if (!nextProject) return false;
+        return Object.values(nextProject.sandboxes).some((sandbox) =>
+          Boolean(sandbox.sessions[nextSessionId]),
+        );
+      },
     );
-    if (!exists) {
-      await ensureSession(nextProjectId);
-      return;
-    }
 
     selectedKey.value = createSessionKey(nextProjectId, nextSessionId);
   }

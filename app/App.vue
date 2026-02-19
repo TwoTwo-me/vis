@@ -318,7 +318,6 @@ import {
 const credentials = useCredentials();
 const { suppressAutoWindows } = useSettings();
 const FOLLOW_THRESHOLD_PX = 24;
-const ROOT_SESSION_BOOTSTRAP_LIMIT = 100_000;
 const FILE_VIEWER_WINDOW_WIDTH = 840;
 const FILE_VIEWER_WINDOW_HEIGHT = 520;
 const TERM_COLUMNS = 80;
@@ -616,8 +615,11 @@ const bootstrapReady = serverState.bootstrapped;
 const sessionSelection = useSessionSelection(
   computed(() => serverState.projects),
   async (projectId) => {
-    const directory = serverState.projects[projectId]?.worktree?.trim() || undefined;
-    const created = (await openCodeApi.createSession(directory, projectId)) as SessionInfo;
+    const directory = serverState.projects[projectId]?.worktree?.trim();
+    if (!directory) {
+      throw new Error('Session create failed: project worktree is empty.');
+    }
+    const created = await openCodeApi.createSession(directory);
     if (!created?.id) {
       throw new Error('Session create failed: invalid response.');
     }
@@ -1975,34 +1977,10 @@ async function handleSaveProject(payload: {
   }
 }
 
-async function listSessionsByDirectory(
-  options: {
-    directory?: string;
-    instanceDirectory?: string;
-    roots?: boolean;
-    search?: string;
-    limit?: number;
-  } = {},
-) {
-  sessionError.value = '';
-  try {
-    const data = (await openCodeApi.listSessions(options)) as SessionInfo[];
-    return Array.isArray(data) ? data : [];
-  } catch (error) {
-    const message = `Session load failed: ${toErrorMessage(error)}`;
-    sessionError.value = message;
-    return [] as SessionInfo[];
-  }
-}
-
-async function createSessionInDirectory(directory: string, worktreeHint?: string) {
-  const projectId =
-    resolveProjectIdForDirectory(directory) ||
-    resolveProjectIdForDirectory(worktreeHint) ||
-    selectedProjectId.value;
-  const session = (await openCodeApi.createSession(directory, projectId)) as SessionInfo;
+async function createSessionInDirectory(directory: string) {
+  const session = await openCodeApi.createSession(directory);
   if (!session?.id) return undefined;
-  await switchSessionSelection(projectId, session.id);
+  await switchSessionSelection(session.projectID, session.id);
   return session;
 }
 
@@ -2019,7 +1997,7 @@ async function createWorktreeFromWorktree(worktree: string) {
       projectId: selectedProjectId.value,
     })) as WorktreeInfo;
     if (data && typeof data.directory === 'string') {
-      await createSessionInDirectory(data.directory, worktree);
+      await createSessionInDirectory(data.directory);
     }
   } catch (error) {
     worktreeError.value = `Worktree create failed: ${toErrorMessage(error)}`;
@@ -2054,7 +2032,7 @@ async function deleteWorktree(directory: string) {
       if (projectId && nextSessionId) {
         selectedKey.value = createSessionKey(projectId, nextSessionId);
       } else {
-        await createSessionInDirectory(baseDir, projectDirectory.value);
+        await createSessionInDirectory(baseDir);
       }
     }
   } catch (error) {
@@ -2070,16 +2048,13 @@ async function createNewSession(): Promise<SessionInfo | undefined> {
   if (!ensureConnectionReady('Creating session')) return undefined;
   sessionError.value = '';
   try {
-    const projectId =
-      resolveProjectIdForDirectory(activeDirectory.value) || selectedProjectId.value;
-    const data = (await openCodeApi.createSession(
-      activeDirectory.value || undefined,
-      projectId,
-    )) as SessionInfo;
+    const directory = activeDirectory.value.trim();
+    if (!directory) {
+      throw new Error('Session create failed: active directory is empty.');
+    }
+    const data = await openCodeApi.createSession(directory);
     if (data && typeof data.id === 'string') {
-      const nextProjectId =
-        resolveProjectIdForDirectory(data.directory || activeDirectory.value) ||
-        selectedProjectId.value;
+      const nextProjectId = data.projectID;
       await switchSessionSelection(nextProjectId, data.id);
     }
     return data;
@@ -2090,7 +2065,7 @@ async function createNewSession(): Promise<SessionInfo | undefined> {
 }
 
 async function handleNewSessionInSandbox(payload: { worktree: string; directory: string }) {
-  await createSessionInDirectory(payload.directory, payload.worktree);
+  await createSessionInDirectory(payload.directory);
 }
 
 function handleTopPanelSessionSelect(payload: {
@@ -2253,29 +2228,17 @@ async function handleProjectDirectorySelect(directory: string) {
   isProjectPickerOpen.value = false;
   if (!directory) return;
 
-  // Check if this is a new project (no existing project with matching worktree)
   const isNewProject = !Object.values(serverState.projects).some((p) => p.worktree === directory);
 
-  const list = await listSessionsByDirectory({
+  const { projectId, sessionId } = await openCodeApi.openProject(directory);
+  ge.sendToWorker({
+    type: 'load-sessions',
     directory,
-    instanceDirectory: directory,
-    roots: true,
-    limit: ROOT_SESSION_BOOTSTRAP_LIMIT,
   });
+  await switchSessionSelection(projectId, sessionId);
 
-  const roots = list.filter((entry) => !entry.parentID && !entry.time?.archived);
-  const preferred = pickPreferredSessionId(roots);
-  if (preferred) {
-    const projectId = resolveProjectIdForDirectory(directory) || '';
-    await switchSessionSelection(projectId, preferred);
-  } else {
-    await createSessionInDirectory(directory);
-  }
-
-  // For new projects, try to set name from package.json
-  const newProjectId = resolveProjectIdForDirectory(directory);
-  if (isNewProject && newProjectId && newProjectId !== 'global') {
-    void initProjectNameFromPackageJson(newProjectId, directory);
+  if (isNewProject && projectId !== 'global') {
+    void initProjectNameFromPackageJson(projectId, directory);
   }
 }
 async function bootstrapSelections() {
@@ -3664,7 +3627,7 @@ watch(
       if (nextProjectId && nextSessionId) {
         selectedKey.value = createSessionKey(nextProjectId, nextSessionId);
       } else if (nextDirectory) {
-        void createSessionInDirectory(nextDirectory, pd || undefined);
+        void createSessionInDirectory(nextDirectory);
       }
     }
 
@@ -5468,7 +5431,7 @@ onMounted(() => {
         if (nextProjectId && nextSessionId) {
           selectedKey.value = createSessionKey(nextProjectId, nextSessionId);
         } else if (sessionInfo.directory) {
-          await createSessionInDirectory(sessionInfo.directory, sessionInfo.directory);
+          await createSessionInDirectory(sessionInfo.directory);
         }
       }
     }),

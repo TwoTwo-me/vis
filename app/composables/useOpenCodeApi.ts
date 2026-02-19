@@ -7,8 +7,7 @@ type ProjectsMap = Record<string, ProjectState>;
 
 type SessionInfo = {
   id: string;
-  projectID?: string;
-  projectId?: string;
+  projectID: string;
   parentID?: string;
   title?: string;
   slug?: string;
@@ -109,18 +108,16 @@ export function useOpenCodeApi(projects: ProjectsMap | Ref<ProjectsMap>) {
     return normalized;
   }
 
-  async function createSession(
-    directory: string | undefined,
-    projectId: string,
-  ): Promise<SessionInfo> {
+  async function createSession(directory: string): Promise<SessionInfo> {
     return withPending(async () => {
-      const requestedProjectId = requireProjectId(projectId);
       const session = (await opencodeApi.createSession(directory)) as SessionInfo;
       if (!session?.id) {
         throw new Error('Session create failed: invalid response.');
       }
-      const effectiveProjectId =
-        normalizeId(session.projectID || session.projectId) || requestedProjectId;
+      const effectiveProjectId = normalizeId(session.projectID);
+      if (!effectiveProjectId) {
+        throw new Error('Session create failed: missing projectID.');
+      }
       const sessionId = normalizeId(session.id);
       await waitWithRetry((state) => Boolean(findSession(state[effectiveProjectId], sessionId)));
       return session;
@@ -134,7 +131,6 @@ export function useOpenCodeApi(projects: ProjectsMap | Ref<ProjectsMap>) {
     projectId: string;
   }): Promise<SessionInfo> {
     return withPending(async () => {
-      const projectId = requireProjectId(payload.projectId);
       const session = (await opencodeApi.forkSession(
         payload.sessionId,
         payload.messageId,
@@ -143,7 +139,10 @@ export function useOpenCodeApi(projects: ProjectsMap | Ref<ProjectsMap>) {
       if (!session?.id) {
         throw new Error('Session fork failed: invalid response.');
       }
-      const effectiveProjectId = normalizeId(session.projectID || session.projectId) || projectId;
+      const effectiveProjectId = normalizeId(session.projectID);
+      if (!effectiveProjectId) {
+        throw new Error('Session fork failed: missing projectID.');
+      }
       await waitWithRetry((state) => Boolean(findSession(state[effectiveProjectId], session.id)));
       return session;
     });
@@ -247,6 +246,35 @@ export function useOpenCodeApi(projects: ProjectsMap | Ref<ProjectsMap>) {
     return Array.isArray(data) ? data : [];
   }
 
+  async function openProject(directory: string): Promise<{ projectId: string; sessionId: string }> {
+    return withPending(async () => {
+      const sessions = await listSessions({ directory, roots: true });
+      const roots = sessions
+        .filter((session) => !session.parentID && !session.time?.archived)
+        .slice()
+        .sort(
+          (a, b) =>
+            (b.time?.updated ?? b.time?.created ?? 0) - (a.time?.updated ?? a.time?.created ?? 0),
+        );
+      const preferred = roots[0];
+      if (preferred) {
+        return {
+          projectId: preferred.projectID,
+          sessionId: preferred.id,
+        };
+      }
+
+      const created = (await opencodeApi.createSession(directory)) as SessionInfo;
+      if (!created?.id) {
+        throw new Error('Session create failed: invalid response.');
+      }
+      return {
+        projectId: created.projectID,
+        sessionId: created.id,
+      };
+    });
+  }
+
   return {
     pending,
     createSession,
@@ -258,6 +286,7 @@ export function useOpenCodeApi(projects: ProjectsMap | Ref<ProjectsMap>) {
     createWorktree,
     deleteWorktree,
     listSessions,
+    openProject,
   };
 }
 
