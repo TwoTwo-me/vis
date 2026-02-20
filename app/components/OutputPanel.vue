@@ -16,9 +16,21 @@
             <div class="app-loading-spinner" aria-hidden="true"></div>
           </div>
           <template v-for="root in visibleRoots" :key="root.id">
-            <div class="thread-block" v-show="!initialRenderTrackingActive">
+            <div
+              class="thread-block"
+              :class="{ 'is-reverted-preview': isRevertedPreview(root) }"
+              v-show="!initialRenderTrackingActive && shouldRenderRoot(root)"
+            >
               <button
-                v-if="root.role === 'user' && root.sessionID"
+                v-if="isRevertedPreview(root)"
+                type="button"
+                class="ib-action ib-action-undo ib-top-right"
+                @click="confirmUndoRevert()"
+              >
+                UNDO
+              </button>
+              <button
+                v-else-if="root.role === 'user' && root.sessionID"
                 type="button"
                 class="ib-action ib-top-right"
                 @click="confirmFork(root)"
@@ -27,7 +39,11 @@
               </button>
 
               <div class="thread-user" :style="getUserBoxStyle(root)">
-                <div v-if="root.role === 'user'" class="ib-msg-block ib-msg-user">
+                <div
+                  v-if="root.role === 'user'"
+                  class="ib-msg-block ib-msg-user"
+                  :class="{ 'ib-msg-user-reverted': isRevertedPreview(root) }"
+                >
                   <div class="ib-msg-row">
                     <MessageViewer
                       :key="`user-${root.id}-${fileCacheVersion}`"
@@ -55,7 +71,7 @@
                 </div>
               </div>
 
-              <div v-if="hasThreadTarget(root)" class="ib-round-target">
+              <div v-if="!isRevertedPreview(root) && hasThreadTarget(root)" class="ib-round-target">
                 <span
                   v-if="threadTargetAgent(root)"
                   class="ib-target-agent"
@@ -75,7 +91,10 @@
                 </span>
               </div>
 
-              <div v-if="hasAssistantMessages(root)" class="thread-assistant">
+              <div
+                v-if="!isRevertedPreview(root) && hasAssistantMessages(root)"
+                class="thread-assistant"
+              >
                 <Transition name="ib-fade" mode="out-in">
                   <div class="ib-msg-block ib-msg-assistant" :key="getDeferredTransitionKey(root)">
                     <div class="ib-msg-body">
@@ -108,12 +127,12 @@
                 </Transition>
               </div>
 
-              <div v-if="getThreadError(root)" class="ib-error-bar">
+              <div v-if="!isRevertedPreview(root) && getThreadError(root)" class="ib-error-bar">
                 <span class="ib-error-icon">⊘</span>
                 <span class="ib-error-text">{{ formatMessageError(getThreadError(root)!) }}</span>
               </div>
 
-              <div class="ib-footer">
+              <div v-if="!isRevertedPreview(root)" class="ib-footer">
                 <span class="ib-footer-meta">
                   <span v-if="formatThreadTimestamp(root)" class="ib-meta-item">
                     <Icon icon="lucide:clock" :width="10" :height="10" />
@@ -281,6 +300,12 @@ const props = defineProps<{
     modelId?: string,
   ) => number | null;
   projectColor?: string;
+  sessionRevert?: {
+    messageID: string;
+    partID?: string;
+    snapshot?: string;
+    diff?: string;
+  } | null;
 }>();
 
 const emit = defineEmits<{
@@ -290,6 +315,7 @@ const emit = defineEmits<{
   (event: 'resume-follow'): void;
   (event: 'fork-message', payload: { sessionId: string; messageId: string }): void;
   (event: 'revert-message', payload: { sessionId: string; messageId: string }): void;
+  (event: 'undo-revert'): void;
   (event: 'show-message-diff', payload: { messageKey: string; diffs: DiffEntry[] }): void;
   (event: 'open-image', payload: { url: string; filename: string }): void;
   (event: 'show-thread-history', payload: { entries: HistoryWindowEntry[] }): void;
@@ -300,6 +326,17 @@ const emit = defineEmits<{
 }>();
 
 const visibleRoots = computed(() => msg.roots.value);
+
+const revertedPreviewRootId = computed(() => {
+  const revert = props.sessionRevert;
+  if (!revert?.messageID) return null;
+  for (const root of visibleRoots.value) {
+    if (root.role !== 'user') continue;
+    if (root.id >= revert.messageID) return root.id;
+  }
+  return null;
+});
+
 const { files, fileCacheVersion } = useFileTree();
 
 const filesWithBasenames = computed(() => {
@@ -551,8 +588,24 @@ function showThreadDiff(root: MessageInfo) {
   emit('show-message-diff', { messageKey: root.id, diffs });
 }
 
+function isRevertedRoot(root: MessageInfo): boolean {
+  const revert = props.sessionRevert;
+  if (!revert?.messageID) return false;
+  return root.id >= revert.messageID;
+}
+
+function isRevertedPreview(root: MessageInfo): boolean {
+  return revertedPreviewRootId.value === root.id;
+}
+
+function shouldRenderRoot(root: MessageInfo): boolean {
+  if (!isRevertedRoot(root)) return true;
+  return isRevertedPreview(root);
+}
+
 function canRevertThread(root: MessageInfo): boolean {
-  return root.role === 'user' && Boolean(root.sessionID) && hasThreadDiffs(root);
+  if (props.sessionRevert) return false;
+  return root.role === 'user' && Boolean(root.sessionID);
 }
 
 function confirmFork(root: MessageInfo) {
@@ -565,6 +618,12 @@ function confirmRevert(root: MessageInfo) {
   if (root.role !== 'user' || !root.sessionID || !root.id) return;
   if (!window.confirm('Revert to this message?')) return;
   emit('revert-message', { sessionId: root.sessionID, messageId: root.id });
+}
+
+function confirmUndoRevert() {
+  if (!props.sessionRevert) return;
+  if (!window.confirm('Undo revert?')) return;
+  emit('undo-revert');
 }
 
 function buildThreadTarget(root: MessageInfo): ThreadTarget {
@@ -1222,6 +1281,15 @@ defineExpose({ panelEl });
   margin: 0;
 }
 
+.thread-block.is-reverted-preview > .thread-user {
+  opacity: 0.45;
+}
+
+.thread-block.is-reverted-preview > .ib-top-right {
+  position: relative;
+  z-index: 1;
+}
+
 .thread-user {
   border-left: 3px solid;
   padding-left: 8px;
@@ -1283,6 +1351,10 @@ defineExpose({ panelEl });
 .ib-msg-user {
   font-size: 13px;
   padding: 4px 0;
+}
+
+.ib-msg-user-reverted {
+  text-decoration: line-through;
 }
 
 .ib-msg-assistant {
@@ -1400,6 +1472,16 @@ defineExpose({ panelEl });
 }
 
 .ib-action-diff:hover {
+  background: rgba(30, 64, 175, 0.55);
+}
+
+.ib-action-undo {
+  border-color: rgba(96, 165, 250, 0.7);
+  background: rgba(30, 58, 138, 0.35);
+  color: #bfdbfe;
+}
+
+.ib-action-undo:hover {
   background: rgba(30, 64, 175, 0.55);
 }
 

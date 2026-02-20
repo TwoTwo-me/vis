@@ -45,10 +45,12 @@
                 :resolve-agent-color="resolveAgentColorForName"
                 :resolve-model-meta="resolveModelMetaForPath"
                 :compute-context-percent="computeContextPercent"
+                :session-revert="sessionRevert"
                 @message-rendered="handleOutputPanelMessageRendered"
                 @resume-follow="handleOutputPanelResumeFollow"
                 @fork-message="handleForkMessage"
                 @revert-message="handleRevertMessage"
+                @undo-revert="handleUndoRevert"
                 @show-message-diff="handleShowMessageDiff"
                 @show-thread-history="handleShowThreadHistory"
                 @edit-message="handleEditMessage"
@@ -516,6 +518,12 @@ type SessionInfo = {
     updated?: number;
     archived?: number;
   };
+  revert?: {
+    messageID: string;
+    partID?: string;
+    snapshot?: string;
+    diff?: string;
+  };
 };
 
 type TopPanelTreeSession = {
@@ -648,6 +656,7 @@ function toSessionInfo(
     timeCreated?: number;
     timeUpdated?: number;
     timeArchived?: number;
+    revert?: SessionInfo['revert'];
   },
 ): SessionInfo {
   return {
@@ -662,7 +671,36 @@ function toSessionInfo(
       updated: session.timeUpdated,
       archived: session.timeArchived,
     },
+    revert: session.revert,
   };
+}
+
+function normalizeSessionRevert(value: unknown): SessionInfo['revert'] | null {
+  if (!value || typeof value !== 'object') return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.messageID !== 'string' || !record.messageID) return null;
+  return {
+    messageID: record.messageID,
+    partID: typeof record.partID === 'string' ? record.partID : undefined,
+    snapshot: typeof record.snapshot === 'string' ? record.snapshot : undefined,
+    diff: typeof record.diff === 'string' ? record.diff : undefined,
+  };
+}
+
+async function refreshSelectedSessionRevert(sessionId: string) {
+  if (!sessionId) {
+    sessionRevert.value = null;
+    return;
+  }
+  try {
+    const directory = activeDirectory.value.trim() || undefined;
+    const session = (await opencodeApi.getSession(sessionId, directory)) as SessionInfo;
+    if (selectedSessionId.value !== sessionId) return;
+    sessionRevert.value = normalizeSessionRevert(session?.revert);
+  } catch {
+    if (selectedSessionId.value !== sessionId) return;
+    sessionRevert.value = null;
+  }
 }
 
 function collectAllSessionsByProject() {
@@ -955,6 +993,8 @@ const {
   updateSessionDiffState,
   normalizeSessionDiffEntries,
 } = useFileTree({ activeDirectory, selectedSessionId });
+
+const sessionRevert = ref<SessionInfo['revert'] | null>(null);
 
 const notificationSessions = computed<TopPanelNotificationSession[]>(() =>
   notificationSessionOrder.value
@@ -2197,10 +2237,32 @@ async function handleRevertMessage(payload: { sessionId: string; messageId: stri
       projectId: selectedProjectId.value,
       directory: activeDirectory.value.trim() || undefined,
     });
+    if (selectedSessionId.value === payload.sessionId) {
+      await refreshSelectedSessionRevert(payload.sessionId);
+    }
     sendStatus.value = 'Reverted.';
-    if (selectedSessionId.value === payload.sessionId) reloadSelectedSessionState();
+    if (selectedSessionId.value === payload.sessionId) void reloadSelectedSessionState();
   } catch (error) {
     sessionError.value = `Session revert failed: ${toErrorMessage(error)}`;
+  }
+}
+
+async function handleUndoRevert() {
+  const sessionId = selectedSessionId.value;
+  if (!sessionId) return;
+  if (!ensureConnectionReady('Undo')) return;
+  sessionError.value = '';
+  try {
+    sendStatus.value = 'Undoing...';
+    const session = (await opencodeApi.unrevertSession(
+      sessionId,
+      activeDirectory.value.trim() || undefined,
+    )) as SessionInfo;
+    sessionRevert.value = normalizeSessionRevert(session?.revert);
+    sendStatus.value = 'Undone.';
+    await reloadSelectedSessionState();
+  } catch (error) {
+    sessionError.value = `Session undo failed: ${toErrorMessage(error)}`;
   }
 }
 
@@ -3694,7 +3756,9 @@ async function reloadSelectedSessionState() {
   todoLoadingBySessionId.value = {};
   todoErrorBySessionId.value = {};
   if (selectedSessionId.value) {
-    await fetchHistory(selectedSessionId.value);
+    const sessionId = selectedSessionId.value;
+    await fetchHistory(sessionId);
+    await refreshSelectedSessionRevert(sessionId);
     if (msg.roots.value.length === 0) {
       scrollOutputPanelToBottom(false);
     }
@@ -3706,6 +3770,8 @@ async function reloadSelectedSessionState() {
     const directory = activeDirectory.value || undefined;
     void fetchPendingPermissions(directory);
     void fetchPendingQuestions(directory);
+  } else {
+    sessionRevert.value = null;
   }
   nextTick(() => inputPanelRef.value?.focus());
 }
@@ -5411,6 +5477,13 @@ onMounted(() => {
     }),
   );
   globalEventUnsubscribers.push(
+    ge.on('session.updated', ({ info }) => {
+      const sessionInfo = info as SessionInfo;
+      if (sessionInfo.id !== selectedSessionId.value) return;
+      sessionRevert.value = normalizeSessionRevert(sessionInfo.revert);
+    }),
+  );
+  globalEventUnsubscribers.push(
     ge.on('session.deleted', async ({ info }) => {
       const sessionInfo = info as SessionInfo;
       const projectId = resolveProjectIdForDirectory(sessionInfo.directory);
@@ -5418,6 +5491,7 @@ onMounted(() => {
         (notificationKey) => notificationKey !== sessionInfo.id,
       );
       if (selectedSessionId.value === sessionInfo.id) {
+        sessionRevert.value = null;
         const nextProjectId = (projectId || selectedProjectId.value).trim();
         const candidates = (sessionsByProject.value[nextProjectId] ?? []).filter(
           (session) =>
