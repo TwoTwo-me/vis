@@ -156,7 +156,10 @@
                           <Icon icon="lucide:git-branch" :width="16" :height="16" />
                         </button>
                         <button
-                          v-if="canDeleteSandbox(sandbox.directory, worktree.directory) && worktree.projectId !== 'global'"
+                          v-if="
+                            canDeleteSandbox(sandbox.directory, worktree.directory) &&
+                            worktree.projectId !== 'global'
+                          "
                           type="button"
                           class="tree-action-button danger"
                           @click.stop="handleSandboxDelete(sandbox.directory, close)"
@@ -172,6 +175,7 @@
                       class="tree-session-row"
                     >
                       <DropdownItem
+                        :href="sessionShareHref(worktree.projectId, session.id)"
                         :value="{
                           projectId: worktree.projectId,
                           worktree: worktree.directory,
@@ -210,7 +214,7 @@
                               ? 'Delete session permanently'
                               : 'Archive session (with Shift key to delete permanently)'
                           "
-                          @click.stop="handleSessionAction(session.id, close)"
+                          @click.stop.prevent="handleSessionAction(session.id, close)"
                         >
                           <Icon
                             :icon="isShiftPressed ? 'lucide:trash-2' : 'lucide:archive'"
@@ -493,6 +497,15 @@ function matchesQuery(query: string, ...fields: (string | undefined)[]) {
   const terms = query.split(/\s+/).filter(Boolean);
   if (terms.length === 0) return false;
   return terms.every((term) => fields.some((field) => field?.toLowerCase().includes(term)));
+}
+
+function sessionShareHref(projectId: string | undefined, sessionId: string) {
+  const params = new URLSearchParams();
+  const normalizedProjectId = projectId?.trim() ?? '';
+  const normalizedSessionId = sessionId.trim();
+  if (normalizedProjectId) params.set('project', normalizedProjectId);
+  if (normalizedSessionId) params.set('session', normalizedSessionId);
+  return `?${params.toString()}`;
 }
 
 function shortenPath(path: string) {

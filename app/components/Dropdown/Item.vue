@@ -1,13 +1,15 @@
 <template>
-  <div
+  <component
+    :is="props.href ? 'a' : 'div'"
     class="ui-dropdown-item ui-input-candidate-item"
+    :href="props.href || undefined"
     :aria-disabled="props.disabled"
     :data-value="JSON.stringify(props.value)"
     :class="{ 'is-active': isActive, 'is-disabled': props.disabled }"
     @click="onClick"
   >
     <slot />
-  </div>
+  </component>
 </template>
 
 <script lang="ts" setup>
@@ -22,6 +24,7 @@ type Props = {
   value?: unknown;
   disabled?: boolean;
   active?: boolean | undefined;
+  href?: string;
 };
 
 const props = defineProps<Props>();
@@ -45,13 +48,28 @@ watch(
   () => api?.update(),
 );
 
-function onClick() {
-  if (props.disabled) return;
+function onClick(event: MouseEvent) {
+  if (props.disabled) {
+    if (props.href) event.preventDefault();
+    return;
+  }
+  if (
+    props.href &&
+    (event.button !== 0 || event.metaKey || event.altKey || event.ctrlKey || event.shiftKey)
+  ) {
+    return;
+  }
+  if (props.href) event.preventDefault();
   api?.select(props.value);
 }
 </script>
 
 <style scoped>
+a.ui-dropdown-item {
+  color: inherit;
+  text-decoration: none;
+}
+
 .ui-dropdown-item {
   cursor: pointer;
   user-select: none;
