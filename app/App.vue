@@ -71,12 +71,15 @@
                 :selected-tree-path="selectedTreePath"
                 :tree-loading="treeLoading"
                 :tree-error="treeError"
-                :tree-status-by-path="sessionStatusByPath"
+                :tree-status-by-path="gitStatusByPath"
+                :tree-branch-info="gitStatus?.branch"
+                :tree-diff-stats="gitStatus?.diffStats"
                 @toggle-collapse="toggleSidePanelCollapsed"
                 @change-tab="setSidePanelTab"
                 @toggle-dir="toggleTreeDirectory"
                 @select-file="selectTreeFile"
-                @open-diff="openSessionDiff"
+                @open-diff="openGitDiff"
+                @open-diff-all="openAllGitDiff"
                 @open-file="openFileViewer"
               />
             </div>
@@ -299,6 +302,7 @@ import {
 } from './components/ToolWindow/utils';
 import { useAutoScroller, type ScrollMode } from './composables/useAutoScroller';
 import { useFileTree, type FileNode } from './composables/useFileTree';
+import { usePtyOneshot } from './composables/usePtyOneshot';
 import { useFloatingWindows } from './composables/useFloatingWindows';
 import { usePermissions, type PermissionRequest } from './composables/usePermissions';
 import { useQuestions, type QuestionRequest, type QuestionInfo } from './composables/useQuestions';
@@ -349,7 +353,6 @@ const TERM_GUTTER_WIDTH_EM = 3.2;
 const TERM_FONT_FAMILY =
   "'Iosevka Term', 'Iosevka Fixed', 'JetBrains Mono', 'Cascadia Mono', 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace";
 const SHELL_LINGER_MS = 1000;
-const COMMIT_SNAPSHOT_TIMEOUT_MS = 30000;
 const COMMIT_SNAPSHOT_SCRIPT = [
   'stty -opost -echo 2>/dev/null',
   'export GIT_PAGER=cat',
@@ -374,7 +377,66 @@ const COMMIT_SNAPSHOT_SCRIPT = [
   '    git --no-pager show "$h:$new" 2>/dev/null | base64 -w 76',
   '  fi',
   'done',
-  'printf "##END\\n"',
+].join('\n');
+const FILE_SNAPSHOT_SCRIPT = [
+  'stty -opost -echo 2>/dev/null',
+  'export GIT_PAGER=cat',
+  'export GIT_TERMINAL_PROMPT=0',
+  'mode=$1',
+  'path=$2',
+  'printf "##BEFORE\\n"',
+  'if [ "$mode" = "staged" ]; then',
+  '  git --no-pager show "HEAD:$path" 2>/dev/null | base64 -w 76',
+  'else',
+  '  git --no-pager show ":$path" 2>/dev/null | base64 -w 76',
+  'fi',
+  'printf "##AFTER\\n"',
+  'if [ "$mode" = "staged" ]; then',
+  '  git --no-pager show ":$path" 2>/dev/null | base64 -w 76',
+  'else',
+  '  if [ -f "$path" ]; then',
+  '    base64 -w 76 < "$path"',
+  '  fi',
+  'fi',
+].join('\n');
+const WORKTREE_SNAPSHOT_SCRIPT = [
+  'stty -opost -echo 2>/dev/null',
+  'export GIT_PAGER=cat',
+  'export GIT_TERMINAL_PROMPT=0',
+  'printf "##TITLE\\tWorking tree (staged + changes)\\n"',
+  'git --no-pager status --porcelain=v1 2>/dev/null | while IFS= read -r line; do',
+  '  [ -z "$line" ] && continue',
+  '  x=${line%"${line#?}"}',
+  '  rest=${line#?}',
+  '  y=${rest%"${rest#?}"}',
+  '  [ "$x" = "?" ] && [ "$y" = "?" ] && continue',
+  '  path=${line#???}',
+  '  old=$path',
+  '  new=$path',
+  '  code=M',
+  '  if [ "$x" = "D" ] || [ "$y" = "D" ]; then',
+  '    code=D',
+  '  elif [ "$x" = "A" ]; then',
+  '    code=A',
+  '  elif [ "$x" = "R" ] || [ "$y" = "R" ]; then',
+  '    code=R',
+  '    old=${path%% -> *}',
+  '    new=${path#* -> }',
+  '  elif [ "$x" = "C" ] || [ "$y" = "C" ]; then',
+  '    code=C',
+  '    old=${path%% -> *}',
+  '    new=${path#* -> }',
+  '  fi',
+  '  printf "##FILE\\t%s\\t%s\\n" "$code" "$new"',
+  '  printf "##BEFORE\\n"',
+  '  if [ "$code" != "A" ]; then',
+  '    git --no-pager show "HEAD:$old" 2>/dev/null | base64 -w 76',
+  '  fi',
+  '  printf "##AFTER\\n"',
+  '  if [ "$code" != "D" ] && [ -f "$new" ]; then',
+  '    base64 -w 76 < "$new"',
+  '  fi',
+  'done',
 ].join('\n');
 const REASONING_CLOSE_DELAY_MS = 3000;
 const SUBAGENT_CLOSE_DELAY_MS = 3000;
@@ -422,6 +484,11 @@ type CommitSnapshotEntry = {
 type CommitSnapshotResult = {
   title: string;
   files: CommitSnapshotEntry[];
+};
+
+type FileSnapshotResult = {
+  before: string;
+  after: string;
 };
 
 type Attachment = {
@@ -1010,15 +1077,15 @@ const {
   selectedTreePath,
   treeLoading,
   treeError,
-  sessionStatusByPath,
-  sessionDiffByPath,
-  refreshSessionDiff,
+  gitStatus,
+  gitStatusByPath,
+  refreshGitStatus,
   toggleTreeDirectory,
   selectTreeFile,
   feed,
-  updateSessionDiffState,
-  normalizeSessionDiffEntries,
-} = useFileTree({ activeDirectory, selectedSessionId });
+} = useFileTree({ activeDirectory });
+
+const { runOneShotPtyCommand } = usePtyOneshot({ activeDirectory });
 
 const sessionRevert = computed<SessionInfo['revert'] | null>(() => {
   const projectId = selectedProjectId.value.trim();
@@ -2358,9 +2425,6 @@ async function bootstrapSelections() {
     }
   } finally {
     isBootstrapping.value = false;
-    if (activeDirectory.value) {
-      void refreshSessionDiff();
-    }
   }
 }
 
@@ -3211,6 +3275,7 @@ async function restoreShellSessions() {
     const ptys = await fetchPtyList(directory || undefined);
     ptys.forEach((pty) => {
       if (pty.status === 'exited') return;
+      if (pty.title === 'One-shot PTY' || pty.title === 'Commit Snapshot') return;
       ensureShellWindow(pty);
     });
   } catch (error) {
@@ -3222,85 +3287,6 @@ async function openShellFromInput(input: string) {
   const { command, args } = parseShellArgs(input);
   const pty = await createPtySession(command, args);
   if (pty) ensureShellWindow(pty);
-}
-
-async function runOneShotPtyCommand(command: string, args: string[]) {
-  const directory = activeDirectory.value || undefined;
-  const data = await opencodeApi.createPty({
-    directory,
-    command,
-    args,
-    cwd: directory,
-    title: 'Commit Snapshot',
-  });
-  const pty = parsePtyInfo(data);
-  if (!pty) {
-    throw new Error('failed to create PTY command session');
-  }
-  try {
-    return await new Promise<string>((resolve, reject) => {
-      const url = buildPtyWsUrl(`/pty/${pty.id}/connect`, directory);
-      const socket = new WebSocket(url);
-      const decoder = new TextDecoder();
-      let captured = '';
-      let settled = false;
-
-      const settle = (handler: () => void) => {
-        if (settled) return;
-        settled = true;
-        clearTimeout(timeoutId);
-        handler();
-      };
-
-      const timeoutId = setTimeout(() => {
-        settle(() => reject(new Error('PTY command timed out')));
-        socket.close();
-      }, COMMIT_SNAPSHOT_TIMEOUT_MS);
-
-      socket.binaryType = 'arraybuffer';
-      socket.addEventListener('message', (event) => {
-        if (event.data instanceof ArrayBuffer) {
-          const bytes = new Uint8Array(event.data);
-          if (bytes.length > 0 && bytes[0] === 0) {
-            return;
-          }
-          captured += decoder.decode(bytes, { stream: true });
-          return;
-        }
-        if (typeof event.data !== 'string') return;
-        const trimmed = event.data.trim();
-        if (trimmed.startsWith('{') && trimmed.endsWith('}')) {
-          try {
-            const payload = JSON.parse(trimmed) as Record<string, unknown>;
-            if (
-              Object.keys(payload).length === 1 &&
-              typeof payload.cursor === 'number' &&
-              Number.isSafeInteger(payload.cursor) &&
-              payload.cursor >= 0
-            ) {
-              return;
-            }
-          } catch (error) {
-            void error;
-          }
-        }
-        captured += event.data;
-      });
-      socket.addEventListener('close', () => {
-        settle(() => {
-          captured += decoder.decode();
-          resolve(captured);
-        });
-      });
-      socket.addEventListener('error', () => {
-        settle(() => reject(new Error('PTY command socket failed')));
-      });
-    });
-  } finally {
-    await opencodeApi.deletePty(pty.id, directory).catch((error) => {
-      log('PTY delete failed', error);
-    });
-  }
 }
 
 function decodeCommitSnapshotBase64(value: string) {
@@ -3361,9 +3347,6 @@ function parseCommitSnapshotOutput(rawOutput: string): CommitSnapshotResult {
       section = 'after';
       continue;
     }
-    if (line === '##END') {
-      break;
-    }
     if (!current || line.length === 0) continue;
     if (section === 'before') {
       current.before.push(line);
@@ -3374,6 +3357,36 @@ function parseCommitSnapshotOutput(rawOutput: string): CommitSnapshotResult {
 
   pushCurrent();
   return { title, files };
+}
+
+function parseFileSnapshotOutput(rawOutput: string): FileSnapshotResult {
+  const lines = rawOutput.split(/\r?\n/);
+  let section: 'none' | 'before' | 'after' = 'none';
+  const before: string[] = [];
+  const after: string[] = [];
+  for (const line of lines) {
+    if (line === '##BEFORE') {
+      section = 'before';
+      continue;
+    }
+    if (line === '##AFTER') {
+      section = 'after';
+      continue;
+    }
+    if (!line) continue;
+    if (section === 'before') {
+      before.push(line);
+      continue;
+    }
+    if (section === 'after') {
+      after.push(line);
+    }
+  }
+
+  return {
+    before: decodeCommitSnapshotBase64(before.join('')),
+    after: decodeCommitSnapshotBase64(after.join('')),
+  };
 }
 
 function parseSlashCommand(input: string) {
@@ -3956,7 +3969,6 @@ async function reloadSelectedSessionState() {
       await restoreShellSessions();
     }
     void reloadTodosForAllowedSessions();
-    void refreshSessionDiff();
     const directory = activeDirectory.value || undefined;
     void fetchPendingPermissions(directory);
     void fetchPendingQuestions(directory);
@@ -4036,13 +4048,11 @@ watch(activeDirectory, (directory) => {
     treeNodes.value = [];
     expandedTreePathSet.value = new Set();
     selectedTreePath.value = '';
-    updateSessionDiffState([]);
     return;
   }
   if (activeDirectory.value && activePath !== activeDirectory.value) return;
   void fetchCommands(activePath);
   void reloadTodosForAllowedSessions();
-  void refreshSessionDiff();
 });
 
 watch(sidePanelCollapsed, () => {
@@ -4447,36 +4457,149 @@ function getFileViewerPosition(factorX = 0.16, factorY = 0.1) {
   return { x, y };
 }
 
-function openSessionDiff(path: string) {
-  const entry = sessionDiffByPath.value[path];
-  if (!entry || !entry.file) return;
-  const key = `session-diff:${path}`;
+async function openGitDiff(payload: { path: string; staged: boolean }) {
+  const { path, staged } = payload;
+  const key = `git-diff:${staged ? 'staged' : 'changes'}:${path}`;
   if (fw.has(key)) {
     fw.bringToFront(key);
     return;
   }
+
+  const mode = staged ? 'staged' : 'unstaged';
   const pos = getFileViewerPosition();
-  fw.open(key, {
-    component: FileViewerContent,
-    props: {
-      path,
-      isDiff: true,
-      diffCode: entry.before ?? '',
-      diffAfter: entry.after,
-      gutterMode: 'none',
-      lang: guessLanguage(path),
-      theme: shikiTheme.value,
-    },
+  await fw.open(key, {
+    content: `Loading ${mode} diff for ${path}...`,
+    lang: 'text',
+    variant: 'plain',
     closable: true,
     resizable: true,
     scroll: 'manual',
-    title: path,
+    title: `${path} (${mode})`,
     x: pos.x,
     y: pos.y,
     width: FILE_VIEWER_WINDOW_WIDTH,
     height: FILE_VIEWER_WINDOW_HEIGHT,
     expiry: Infinity,
   });
+
+  try {
+    const output = await runOneShotPtyCommand('bash', [
+      '--noprofile',
+      '--norc',
+      '-c',
+      FILE_SNAPSHOT_SCRIPT,
+      '_',
+      mode,
+      path,
+    ]);
+    const snapshot = parseFileSnapshotOutput(output);
+    if (!fw.has(key)) return;
+    await fw.open(key, {
+      component: FileViewerContent,
+      props: {
+        path,
+        isDiff: true,
+        diffCode: snapshot.before,
+        diffAfter: snapshot.after,
+        gutterMode: 'none',
+        lang: guessLanguage(path),
+        theme: shikiTheme.value,
+      },
+      closable: true,
+      resizable: true,
+      scroll: 'manual',
+      title: `${path} (${mode})`,
+      x: pos.x,
+      y: pos.y,
+      width: FILE_VIEWER_WINDOW_WIDTH,
+      height: FILE_VIEWER_WINDOW_HEIGHT,
+      expiry: Infinity,
+    });
+  } catch (error) {
+    log('File snapshot failed', error);
+    if (fw.has(key)) {
+      await fw.close(key);
+    }
+  }
+}
+
+async function openAllGitDiff() {
+  const key = 'git-diff:all';
+  if (fw.has(key)) {
+    fw.bringToFront(key);
+    return;
+  }
+
+  const pos = getFileViewerPosition();
+  await fw.open(key, {
+    content: 'Loading all changes...',
+    lang: 'text',
+    variant: 'plain',
+    closable: true,
+    resizable: true,
+    scroll: 'manual',
+    title: 'working tree diff',
+    x: pos.x,
+    y: pos.y,
+    width: FILE_VIEWER_WINDOW_WIDTH,
+    height: FILE_VIEWER_WINDOW_HEIGHT,
+    expiry: Infinity,
+  });
+
+  try {
+    const output = await runOneShotPtyCommand('bash', [
+      '--noprofile',
+      '--norc',
+      '-c',
+      WORKTREE_SNAPSHOT_SCRIPT,
+    ]);
+    const snapshot = parseCommitSnapshotOutput(output);
+    if (snapshot.files.length === 0) {
+      throw new Error('no files parsed from working tree snapshot');
+    }
+    if (!fw.has(key)) return;
+
+    const first = snapshot.files[0];
+    const title =
+      snapshot.title ||
+      (snapshot.files.length === 1 ? first.file : `${snapshot.files.length} files changed`);
+    const diffTabs =
+      snapshot.files.length > 1
+        ? snapshot.files.map((entry) => ({
+            file: entry.file,
+            before: entry.before,
+            after: entry.after,
+          }))
+        : undefined;
+
+    await fw.open(key, {
+      component: FileViewerContent,
+      props: {
+        path: first.file,
+        isDiff: true,
+        diffCode: first.before,
+        diffAfter: first.after,
+        diffTabs,
+        gutterMode: 'double',
+        lang: snapshot.files.length === 1 ? guessLanguage(first.file) : 'text',
+        theme: shikiTheme.value,
+      },
+      title,
+      closable: true,
+      resizable: true,
+      scroll: 'manual',
+      x: pos.x,
+      y: pos.y,
+      width: FILE_VIEWER_WINDOW_WIDTH,
+      height: FILE_VIEWER_WINDOW_HEIGHT,
+      expiry: Infinity,
+    });
+  } catch (error) {
+    log('Working tree snapshot failed', error);
+    if (fw.has(key)) {
+      await fw.close(key);
+    }
+  }
 }
 
 function handleShowMessageDiff(payload: { messageKey: string; diffs: Array<MessageDiffEntry> }) {
@@ -5572,7 +5695,7 @@ async function startInitialization() {
       const directory = activeDirectory.value || undefined;
       await fetchPendingPermissions(directory);
       await fetchPendingQuestions(directory);
-      void refreshSessionDiff();
+      void refreshGitStatus();
     }
     connectionState.value = 'ready';
     uiInitState.value = 'ready';
@@ -5759,20 +5882,6 @@ onMounted(() => {
         (notificationKey) => notificationKey !== sessionInfo.id,
       );
       validateSelectedSession();
-    }),
-  );
-  globalEventUnsubscribers.push(
-    mainSessionScope.on('session.diff', ({ diff }) => {
-      const directory = activeDirectory.value.trim();
-      if (!directory) {
-        updateSessionDiffState([]);
-        return;
-      }
-      if (Array.isArray(diff)) {
-        updateSessionDiffState(normalizeSessionDiffEntries(diff));
-        return;
-      }
-      void refreshSessionDiff();
     }),
   );
   globalEventUnsubscribers.push(

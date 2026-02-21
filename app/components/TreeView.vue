@@ -1,7 +1,44 @@
 <template>
   <div class="tree-view">
     <div class="tree-header">
+      <div class="tree-branch" :title="branchTitle">
+        <Icon icon="lucide:git-branch" :width="13" :height="13" class="tree-branch-icon" />
+        <span class="tree-branch-name">{{ branchInfo?.branch ?? 'no git' }}</span>
+        <span v-if="branchInfo && branchInfo.ahead > 0" class="tree-branch-ahead">
+          <Icon icon="lucide:arrow-up" :width="11" :height="11" />{{ branchInfo.ahead }}
+        </span>
+        <span v-if="branchInfo && branchInfo.behind > 0" class="tree-branch-behind">
+          <Icon icon="lucide:arrow-down" :width="11" :height="11" />{{ branchInfo.behind }}
+        </span>
+        <span
+          v-if="diffStats && (diffStats.additions > 0 || diffStats.deletions > 0)"
+          class="tree-branch-stats"
+          role="button"
+          tabindex="0"
+          title="Open combined diff (staged + changes)"
+          @click="onDiffStatsClick"
+          @keydown.enter.prevent="onDiffStatsClick"
+          @keydown.space.prevent="onDiffStatsClick"
+        >
+          <span v-if="diffStats.additions > 0" class="tree-stat-add"
+            >+{{ diffStats.additions }}</span
+          >
+          <span v-if="diffStats.deletions > 0" class="tree-stat-del"
+            >−{{ diffStats.deletions }}</span
+          >
+        </span>
+      </div>
       <div class="tree-tabs" role="tablist" aria-label="Tree mode">
+        <button
+          type="button"
+          class="tree-tab"
+          :class="{ 'is-active': viewMode === 'staged' }"
+          role="tab"
+          :aria-selected="viewMode === 'staged'"
+          @click="setViewMode('staged')"
+        >
+          Staged
+        </button>
         <button
           type="button"
           class="tree-tab"
@@ -30,14 +67,18 @@
         v-for="row in visibleRows"
         :key="row.node.path"
         class="tree-row"
-        :class="{
-          'is-directory': row.node.type === 'directory',
-          'is-file': row.node.type !== 'directory',
-          'is-selected': selectedPath === row.node.path,
-          'is-ignored': row.node.ignored,
-          'is-deleted': row.node.type !== 'directory' && statusFor(row.node.path) === 'deleted',
-          'has-status': Boolean(statusFor(row.node.path)),
-        }"
+        :class="[
+          {
+            'is-directory': row.node.type === 'directory',
+            'is-file': row.node.type !== 'directory',
+            'is-selected': selectedPath === row.node.path,
+            'is-ignored': row.node.ignored,
+            'is-deleted':
+              row.node.type !== 'directory' && displayStatus(row.node.path)?.code === 'D',
+            'has-status': hasAnyStatus(row.node.path),
+          },
+          rowStatusClass(row.node.path),
+        ]"
         :style="{ '--indent': String(row.depth) }"
         @click="onRowClick(row)"
         @dblclick="onRowDoubleClick(row)"
@@ -59,14 +100,14 @@
         <span class="tree-icon">{{ row.node.type === 'directory' ? '📁' : '📄' }}</span>
         <span class="tree-name">{{ row.node.name }}</span>
         <button
-          v-if="statusFor(row.node.path) && row.node.type !== 'directory'"
+          v-if="displayStatus(row.node.path) && row.node.type !== 'directory'"
           type="button"
           class="tree-status tree-status-button"
-          :class="`is-${statusFor(row.node.path)}`"
-          @click.stop="emit('open-diff', row.node.path)"
+          :class="statusClass(displayStatus(row.node.path))"
+          @click.stop="onStatusClick(row.node.path)"
           @dblclick.stop
         >
-          {{ statusLabel(statusFor(row.node.path)) }}
+          {{ statusLabel(displayStatus(row.node.path)?.code) }}
         </button>
       </div>
       <div v-if="isLoading" class="tree-loading">Loading...</div>
@@ -88,8 +129,33 @@ export type TreeNode = {
   synthetic?: boolean;
 };
 
-type TreeStatus = 'added' | 'modified' | 'deleted';
-type TreeViewMode = 'changes' | 'all';
+export type GitStatusCode = '' | 'M' | 'A' | 'D' | 'R' | 'C' | '?';
+
+export type GitFileStatus = {
+  path: string;
+  index: GitStatusCode;
+  worktree: GitStatusCode;
+  origPath?: string;
+};
+
+export type GitBranchInfo = {
+  branch: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+};
+
+export type GitDiffStats = {
+  additions: number;
+  deletions: number;
+};
+
+type TreeViewMode = 'staged' | 'changes' | 'all';
+
+type DisplayStatus = {
+  code: GitStatusCode;
+  staged: boolean;
+};
 
 const props = defineProps<{
   rootNodes: TreeNode[];
@@ -97,18 +163,28 @@ const props = defineProps<{
   selectedPath?: string;
   isLoading: boolean;
   error?: string;
-  statusByPath?: Record<string, TreeStatus>;
+  gitStatusByPath?: Record<string, GitFileStatus>;
+  branchInfo?: GitBranchInfo | null;
+  diffStats?: GitDiffStats | null;
 }>();
 
 const emit = defineEmits<{
   (event: 'toggle-dir', path: string): void;
   (event: 'select-file', path: string): void;
-  (event: 'open-diff', path: string): void;
+  (event: 'open-diff', payload: { path: string; staged: boolean }): void;
+  (event: 'open-diff-all'): void;
   (event: 'open-file', path: string): void;
 }>();
 
 const viewMode = ref<TreeViewMode>('all');
 const expanded = computed(() => new Set(props.expandedPaths));
+
+const branchTitle = computed(() => {
+  const info = props.branchInfo;
+  if (!info) return 'Git status unavailable';
+  if (!info.upstream) return info.branch;
+  return `${info.branch}...${info.upstream}`;
+});
 
 function setViewMode(mode: TreeViewMode) {
   viewMode.value = mode;
@@ -138,11 +214,29 @@ function normalizePath(value: string) {
     .replace(/\/$/, '');
 }
 
-function withPseudoNodes(nodes: TreeNode[], statusByPath: Record<string, TreeStatus>): TreeNode[] {
+function hasStaged(status: GitFileStatus) {
+  return status.index !== '' && status.index !== '?';
+}
+
+function hasChanges(status: GitFileStatus) {
+  return status.index === '?' || status.worktree === '?' || status.worktree !== '';
+}
+
+function needsPseudoNode(status: GitFileStatus) {
+  if (status.index === '?' || status.worktree === '?') return true;
+  if (status.index === 'A' || status.index === 'D') return true;
+  if (status.worktree === 'A' || status.worktree === 'D') return true;
+  return false;
+}
+
+function withPseudoNodes(
+  nodes: TreeNode[],
+  statusByPath: Record<string, GitFileStatus>,
+): TreeNode[] {
   const result = cloneNodes(nodes);
-  const missingPaths = Object.entries(statusByPath)
-    .filter(([, status]) => status === 'deleted' || status === 'added')
-    .map(([path]) => normalizePath(path))
+  const missingPaths = Object.values(statusByPath)
+    .filter((status) => needsPseudoNode(status))
+    .map((status) => normalizePath(status.path))
     .filter((path) => path.length > 0)
     .sort((a, b) => a.split('/').length - b.split('/').length);
 
@@ -182,12 +276,12 @@ function withPseudoNodes(nodes: TreeNode[], statusByPath: Record<string, TreeSta
   return result;
 }
 
-function filterChanges(nodes: TreeNode[], statusByPath: Record<string, TreeStatus>): TreeNode[] {
+function filterByPredicate(nodes: TreeNode[], predicate: (path: string) => boolean): TreeNode[] {
   const result: TreeNode[] = [];
   nodes.forEach((node) => {
-    const children = node.children ? filterChanges(node.children, statusByPath) : undefined;
-    const changed = Boolean(statusByPath[node.path]);
-    if (!changed && (!children || children.length === 0)) return;
+    const children = node.children ? filterByPredicate(node.children, predicate) : undefined;
+    const matched = predicate(node.path);
+    if (!matched && (!children || children.length === 0)) return;
     result.push({
       ...node,
       children,
@@ -196,11 +290,22 @@ function filterChanges(nodes: TreeNode[], statusByPath: Record<string, TreeStatu
   return result;
 }
 
-const normalizedNodes = computed(() => withPseudoNodes(props.rootNodes, props.statusByPath ?? {}));
+const normalizedNodes = computed(() =>
+  withPseudoNodes(props.rootNodes, props.gitStatusByPath ?? {}),
+);
 
 const displayNodes = computed(() => {
   if (viewMode.value === 'all') return normalizedNodes.value;
-  return filterChanges(normalizedNodes.value, props.statusByPath ?? {});
+  if (viewMode.value === 'staged') {
+    return filterByPredicate(normalizedNodes.value, (path) => {
+      const status = props.gitStatusByPath?.[path];
+      return Boolean(status && hasStaged(status));
+    });
+  }
+  return filterByPredicate(normalizedNodes.value, (path) => {
+    const status = props.gitStatusByPath?.[path];
+    return Boolean(status && hasChanges(status));
+  });
 });
 
 const visibleRows = computed(() => {
@@ -221,15 +326,99 @@ function isExpanded(path: string) {
   return expanded.value.has(path);
 }
 
-function statusFor(path: string) {
-  return props.statusByPath?.[path];
+function displayStatus(path: string): DisplayStatus | null {
+  const status = props.gitStatusByPath?.[path];
+  if (!status) return null;
+
+  if (viewMode.value === 'staged') {
+    if (!hasStaged(status)) return null;
+    return {
+      code: status.index,
+      staged: true,
+    };
+  }
+
+  if (viewMode.value === 'changes') {
+    if (!hasChanges(status)) return null;
+    if (status.index === '?' || status.worktree === '?') {
+      return {
+        code: '?',
+        staged: false,
+      };
+    }
+    return {
+      code: status.worktree,
+      staged: false,
+    };
+  }
+
+  if (status.index === '?' || status.worktree === '?') {
+    return {
+      code: '?',
+      staged: false,
+    };
+  }
+  if (status.worktree !== '') {
+    return {
+      code: status.worktree,
+      staged: false,
+    };
+  }
+  if (status.index !== '') {
+    return {
+      code: status.index,
+      staged: true,
+    };
+  }
+  return null;
 }
 
-function statusLabel(status?: TreeStatus) {
-  if (status === 'added') return 'A';
-  if (status === 'deleted') return 'D';
-  if (status === 'modified') return 'M';
+function hasAnyStatus(path: string) {
+  return Boolean(props.gitStatusByPath?.[path]);
+}
+
+function statusLabel(code?: GitStatusCode) {
+  if (code === '?') return 'U';
+  if (code === 'A') return 'A';
+  if (code === 'D') return 'D';
+  if (code === 'M') return 'M';
+  if (code === 'R') return 'R';
+  if (code === 'C') return 'C';
   return '';
+}
+
+function statusClass(status: DisplayStatus | null) {
+  if (!status) return '';
+  const classes: string[] = [status.staged ? 'is-staged' : 'is-unstaged'];
+  if (status.code === 'M') classes.push('is-modified');
+  else if (status.code === 'A') classes.push('is-added');
+  else if (status.code === 'D') classes.push('is-deleted-status');
+  else if (status.code === 'R') classes.push('is-renamed');
+  else if (status.code === '?') classes.push('is-untracked');
+  else if (status.code === 'C') classes.push('is-copied');
+  return classes.join(' ');
+}
+
+function rowStatusClass(path: string) {
+  const status = displayStatus(path);
+  if (!status) return '';
+  if (status.code === 'M') return 'row-modified';
+  if (status.code === 'A') return 'row-added';
+  if (status.code === 'D') return 'row-deleted';
+  if (status.code === 'R') return 'row-renamed';
+  if (status.code === '?') return 'row-untracked';
+  if (status.code === 'C') return 'row-copied';
+  return '';
+}
+
+function onStatusClick(path: string) {
+  const status = displayStatus(path);
+  if (!status) return;
+  emit('open-diff', { path, staged: status.staged });
+}
+
+function onDiffStatsClick() {
+  emit('open-diff-all');
 }
 
 function onRowClick(row: { node: TreeNode }) {
@@ -242,8 +431,10 @@ function onRowClick(row: { node: TreeNode }) {
 
 function onRowDoubleClick(row: { node: TreeNode }) {
   if (row.node.type === 'directory') return;
-  // Allow opening synthetic nodes when they represent newly added files (they exist on disk)
-  if (row.node.synthetic && statusFor(row.node.path) !== 'added') return;
+  if (row.node.synthetic) {
+    const status = displayStatus(row.node.path);
+    if (!status || status.code === 'D') return;
+  }
   emit('open-file', row.node.path);
 }
 </script>
@@ -258,10 +449,88 @@ function onRowDoubleClick(row: { node: TreeNode }) {
 
 .tree-header {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
+  flex-direction: column;
+  gap: 8px;
   padding: 8px;
   border-bottom: 1px solid rgba(100, 116, 139, 0.28);
+}
+
+.tree-branch {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: #94a3b8;
+  white-space: nowrap;
+  overflow: hidden;
+  min-height: 20px;
+}
+
+.tree-branch-icon {
+  color: #60a5fa;
+  flex-shrink: 0;
+}
+
+.tree-branch-name {
+  font-weight: 600;
+  color: #cbd5e1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.tree-branch-ahead,
+.tree-branch-behind {
+  display: inline-flex;
+  align-items: center;
+  gap: 1px;
+  font-size: 10px;
+  font-weight: 600;
+  padding: 0 4px;
+  border-radius: 999px;
+  line-height: 16px;
+  height: 16px;
+}
+
+.tree-branch-ahead {
+  color: #86efac;
+  background: rgba(74, 222, 128, 0.12);
+}
+
+.tree-branch-behind {
+  color: #fca5a5;
+  background: rgba(248, 113, 113, 0.12);
+}
+
+.tree-branch-stats {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  cursor: pointer;
+  border-radius: 999px;
+  padding: 1px 6px;
+  transition: background 0.12s ease;
+}
+
+.tree-branch-stats:hover {
+  background: rgba(51, 65, 85, 0.55);
+}
+
+.tree-branch-stats:focus-visible {
+  outline: 1px solid rgba(96, 165, 250, 0.7);
+  outline-offset: 1px;
+}
+
+.tree-stat-add {
+  color: #73c991;
+}
+
+.tree-stat-del {
+  color: #c74e39;
 }
 
 .tree-tabs {
@@ -342,10 +611,6 @@ function onRowDoubleClick(row: { node: TreeNode }) {
   text-decoration: line-through;
 }
 
-.tree-row.has-status .tree-name {
-  color: #60a5fa;
-}
-
 .tree-toggle {
   border: 0;
   background: transparent;
@@ -376,14 +641,20 @@ function onRowDoubleClick(row: { node: TreeNode }) {
   text-overflow: ellipsis;
 }
 
+/* --- Git status badge (base) --- */
 .tree-status {
   min-width: 16px;
   text-align: center;
   font-size: 10px;
+  font-weight: 700;
   border-radius: 999px;
   border: 1px solid rgba(148, 163, 184, 0.45);
   line-height: 16px;
   height: 16px;
+  transition:
+    background 0.12s ease,
+    color 0.12s ease,
+    border-color 0.12s ease;
 }
 
 .tree-status-button {
@@ -392,19 +663,142 @@ function onRowDoubleClick(row: { node: TreeNode }) {
   cursor: pointer;
 }
 
-.tree-status.is-added {
-  color: #86efac;
-  border-color: rgba(74, 222, 128, 0.6);
-}
+/* --- VSCode-style per-status-code colors --- */
 
+/* Modified (yellow/amber) */
 .tree-status.is-modified {
-  color: #fde68a;
-  border-color: rgba(250, 204, 21, 0.6);
+  color: #e2c08d;
+  border-color: rgba(226, 192, 141, 0.55);
 }
 
-.tree-status.is-deleted {
-  color: #fecaca;
-  border-color: rgba(248, 113, 113, 0.6);
+/* Added (green) */
+.tree-status.is-added {
+  color: #73c991;
+  border-color: rgba(115, 201, 145, 0.55);
+}
+
+/* Deleted (red) */
+.tree-status.is-deleted-status {
+  color: #c74e39;
+  border-color: rgba(199, 78, 57, 0.55);
+}
+
+/* Renamed (cyan) */
+.tree-status.is-renamed {
+  color: #4ec9b0;
+  border-color: rgba(78, 201, 176, 0.55);
+}
+
+/* Untracked (green, same as added) */
+.tree-status.is-untracked {
+  color: #73c991;
+  border-color: rgba(115, 201, 145, 0.55);
+}
+
+/* Copied (cyan, same as renamed) */
+.tree-status.is-copied {
+  color: #4ec9b0;
+  border-color: rgba(78, 201, 176, 0.55);
+}
+
+/* Staged: slightly brighter/higher saturation */
+.tree-status.is-staged.is-modified {
+  color: #f0d6a0;
+  border-color: rgba(240, 214, 160, 0.65);
+}
+
+.tree-status.is-staged.is-added {
+  color: #86efac;
+  border-color: rgba(134, 239, 172, 0.65);
+}
+
+.tree-status.is-staged.is-deleted-status {
+  color: #e06050;
+  border-color: rgba(224, 96, 80, 0.65);
+}
+
+.tree-status.is-staged.is-renamed {
+  color: #5ee0c8;
+  border-color: rgba(94, 224, 200, 0.65);
+}
+
+.tree-status.is-staged.is-copied {
+  color: #5ee0c8;
+  border-color: rgba(94, 224, 200, 0.65);
+}
+
+/* --- Hover: fill background, invert text (knockout effect) --- */
+.tree-status-button.is-modified:hover {
+  background: #e2c08d;
+  color: #1e1e1e;
+  border-color: #e2c08d;
+}
+
+.tree-status-button.is-added:hover,
+.tree-status-button.is-untracked:hover {
+  background: #73c991;
+  color: #1e1e1e;
+  border-color: #73c991;
+}
+
+.tree-status-button.is-deleted-status:hover {
+  background: #c74e39;
+  color: #fff;
+  border-color: #c74e39;
+}
+
+.tree-status-button.is-renamed:hover,
+.tree-status-button.is-copied:hover {
+  background: #4ec9b0;
+  color: #1e1e1e;
+  border-color: #4ec9b0;
+}
+
+.tree-status-button.is-staged.is-modified:hover {
+  background: #f0d6a0;
+  color: #1e1e1e;
+  border-color: #f0d6a0;
+}
+
+.tree-status-button.is-staged.is-added:hover {
+  background: #86efac;
+  color: #1e1e1e;
+  border-color: #86efac;
+}
+
+.tree-status-button.is-staged.is-deleted-status:hover {
+  background: #e06050;
+  color: #fff;
+  border-color: #e06050;
+}
+
+.tree-status-button.is-staged.is-renamed:hover,
+.tree-status-button.is-staged.is-copied:hover {
+  background: #5ee0c8;
+  color: #1e1e1e;
+  border-color: #5ee0c8;
+}
+
+/* --- File name color by status (row-level classes) --- */
+.tree-row.row-modified .tree-name {
+  color: #e2c08d;
+}
+
+.tree-row.row-added .tree-name,
+.tree-row.row-untracked .tree-name {
+  color: #73c991;
+}
+
+.tree-row.row-deleted .tree-name {
+  color: #c74e39;
+}
+
+.tree-row.row-renamed .tree-name {
+  color: #4ec9b0;
+}
+
+.tree-row.row-copied .tree-name {
+  color: #4ec9b0;
 }
 
 .tree-loading,

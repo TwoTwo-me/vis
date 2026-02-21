@@ -2,6 +2,20 @@ import { computed, ref, watch } from 'vue';
 import type { Ref } from 'vue';
 import type { FileWatcherUpdatedPacket } from '../types/sse';
 import * as opencodeApi from '../utils/opencode';
+import { usePtyOneshot } from './usePtyOneshot';
+
+const GIT_STATUS_SCRIPT = [
+  'stty -opost -echo 2>/dev/null',
+  'export GIT_PAGER=cat',
+  'export GIT_TERMINAL_PROMPT=0',
+  'export NO_COLOR=1',
+  'export GIT_CONFIG_NOSYSTEM=1',
+  'export TERM=dumb',
+  'git -c color.status=false -c color.ui=false --no-pager status --porcelain=v1 -sb 2>/dev/null',
+  'printf "##DIFFSTAT\\n"',
+  'git diff --shortstat 2>/dev/null',
+  'git diff --cached --shortstat 2>/dev/null',
+].join('\n');
 
 export type TreeNode = {
   name: string;
@@ -20,18 +34,35 @@ export type FileNode = {
   ignored?: boolean;
 };
 
-export type SessionDiffEntry = {
-  file?: string;
-  before?: string;
-  after?: string;
-  additions?: number;
-  deletions?: number;
-  status?: 'added' | 'modified' | 'deleted';
+export type GitStatusCode = '' | 'M' | 'A' | 'D' | 'R' | 'C' | '?';
+
+export type GitFileStatus = {
+  path: string;
+  index: GitStatusCode;
+  worktree: GitStatusCode;
+  origPath?: string;
+};
+
+export type GitBranchInfo = {
+  branch: string;
+  upstream?: string;
+  ahead: number;
+  behind: number;
+};
+
+export type GitDiffStats = {
+  additions: number;
+  deletions: number;
+};
+
+export type GitStatus = {
+  branch: GitBranchInfo;
+  files: GitFileStatus[];
+  diffStats: GitDiffStats;
 };
 
 type UseFileTreeOptions = {
   activeDirectory: Ref<string>;
-  selectedSessionId: Ref<string>;
 };
 
 let boundOptions: UseFileTreeOptions | null = null;
@@ -41,16 +72,16 @@ const expandedTreePathSet = ref(new Set<string>());
 const selectedTreePath = ref('');
 const treeLoading = ref(false);
 const treeError = ref('');
-const sessionStatusByPath = ref<Record<string, 'added' | 'modified' | 'deleted'>>({});
-const sessionDiffEntries = ref<SessionDiffEntry[]>([]);
-const sessionDiffByPath = ref<Record<string, SessionDiffEntry>>({});
+const gitStatus = ref<GitStatus | null>(null);
+const gitStatusByPath = ref<Record<string, GitFileStatus>>({});
 const files = ref<string[]>([]);
 const fileCacheVersion = ref(0);
 
-let sessionDiffRequestId = 0;
 let fileCacheBuildId = 0;
 const DIRECTORY_RELOAD_DEBOUNCE_MS = 120;
+const GIT_STATUS_RELOAD_DEBOUNCE_MS = 120;
 const scheduledDirectoryReloads = new Map<string, ReturnType<typeof setTimeout>>();
+let scheduledGitStatusReload: ReturnType<typeof setTimeout> | null = null;
 
 function getOptions(): UseFileTreeOptions {
   if (!boundOptions) {
@@ -80,8 +111,9 @@ function toRelativePath(path: string, directory: string) {
   const normalizedPath = normalizeDirectory(path);
   if (normalizedPath === normalizedDirectory) return '.';
   const prefix = `${normalizedDirectory}/`;
-  if (normalizedPath.startsWith(prefix))
+  if (normalizedPath.startsWith(prefix)) {
     return normalizeRelativePath(normalizedPath.slice(prefix.length));
+  }
   return normalizeRelativePath(normalizedPath);
 }
 
@@ -189,6 +221,12 @@ function clearScheduledDirectoryReloads() {
   scheduledDirectoryReloads.clear();
 }
 
+function clearScheduledGitStatusReload() {
+  if (!scheduledGitStatusReload) return;
+  clearTimeout(scheduledGitStatusReload);
+  scheduledGitStatusReload = null;
+}
+
 function isPathInsideDirectory(path: string, directory: string) {
   const normalizedDirectory = normalizeDirectory(directory);
   const normalizedPath = normalizeDirectory(path);
@@ -258,23 +296,12 @@ function scheduleDirectoryReload(path: string) {
   );
 }
 
-function aggregateSessionStatuses() {
-  const fileStatuses = sessionStatusByPath.value;
-  const next: Record<string, 'added' | 'modified' | 'deleted'> = { ...fileStatuses };
-  const priority = { added: 1, modified: 2, deleted: 3 } as const;
-  Object.entries(fileStatuses).forEach(([path, status]) => {
-    if (path === '.') return;
-    const segments = path.split('/');
-    while (segments.length > 1) {
-      segments.pop();
-      const parent = segments.join('/');
-      const current = next[parent];
-      if (!current || priority[status] > priority[current]) {
-        next[parent] = status;
-      }
-    }
-  });
-  sessionStatusByPath.value = next;
+function scheduleGitStatusReload() {
+  clearScheduledGitStatusReload();
+  scheduledGitStatusReload = setTimeout(() => {
+    scheduledGitStatusReload = null;
+    void refreshGitStatus();
+  }, GIT_STATUS_RELOAD_DEBOUNCE_MS);
 }
 
 function toErrorMessage(error: unknown) {
@@ -282,66 +309,177 @@ function toErrorMessage(error: unknown) {
   return String(error);
 }
 
-function normalizeSessionDiffEntries(entries: unknown[]) {
-  return entries
-    .map((entry) => {
-      if (!entry || typeof entry !== 'object') return null;
-      const record = entry as Record<string, unknown>;
-      const file = typeof record.file === 'string' ? record.file : undefined;
-      const status =
-        typeof record.status === 'string'
-          ? (record.status as 'added' | 'modified' | 'deleted')
-          : undefined;
-      const additions = typeof record.additions === 'number' ? record.additions : undefined;
-      const deletions = typeof record.deletions === 'number' ? record.deletions : undefined;
-      const before = typeof record.before === 'string' ? record.before : undefined;
-      const after = typeof record.after === 'string' ? record.after : undefined;
-      return { file, status, additions, deletions, before, after } as SessionDiffEntry;
-    })
-    .filter((entry): entry is SessionDiffEntry => Boolean(entry?.file));
+function normalizeGitStatusCode(value: string): GitStatusCode {
+  if (value === ' ') return '';
+  if (value === '?') return '?';
+  if (value === 'M') return 'M';
+  if (value === 'A') return 'A';
+  if (value === 'D') return 'D';
+  if (value === 'R') return 'R';
+  if (value === 'C') return 'C';
+  return '';
 }
 
-function updateSessionDiffState(entries: SessionDiffEntry[]) {
-  sessionDiffEntries.value = entries;
-  const next: Record<string, 'added' | 'modified' | 'deleted'> = {};
-  const nextByPath: Record<string, SessionDiffEntry> = {};
-  const directory = getOptions().activeDirectory.value.trim();
-  entries.forEach((entry) => {
-    if (!entry.file) return;
-    const relativePath = toRelativePath(entry.file, directory);
-    if (relativePath === '.') return;
-    if (entry.status) next[relativePath] = entry.status;
-    nextByPath[relativePath] = entry;
-  });
-  sessionStatusByPath.value = next;
-  sessionDiffByPath.value = nextByPath;
-  aggregateSessionStatuses();
+function parseGitStatusBranch(line: string): GitBranchInfo {
+  const raw = line.replace(/^##\s*/, '').trim();
+  let ahead = 0;
+  let behind = 0;
+  let branchPart = raw;
+
+  const markerStart = raw.indexOf(' [');
+  if (markerStart >= 0 && raw.endsWith(']')) {
+    branchPart = raw.slice(0, markerStart);
+    const marker = raw.slice(markerStart + 2, -1);
+    const aheadMatch = marker.match(/ahead\s+(\d+)/);
+    const behindMatch = marker.match(/behind\s+(\d+)/);
+    ahead = aheadMatch ? Number.parseInt(aheadMatch[1], 10) || 0 : 0;
+    behind = behindMatch ? Number.parseInt(behindMatch[1], 10) || 0 : 0;
+  }
+
+  const divergenceIndex = branchPart.indexOf('...');
+  if (divergenceIndex < 0) {
+    return {
+      branch: branchPart || '(detached)',
+      ahead,
+      behind,
+    };
+  }
+
+  const branch = branchPart.slice(0, divergenceIndex).trim() || '(detached)';
+  const upstream = branchPart.slice(divergenceIndex + 3).trim();
+  return {
+    branch,
+    upstream: upstream || undefined,
+    ahead,
+    behind,
+  };
 }
 
-async function refreshSessionDiff() {
-  const requestId = ++sessionDiffRequestId;
-  const options = getOptions();
-  const sessionId = options.selectedSessionId.value;
-  if (!sessionId) {
-    updateSessionDiffState([]);
+function stripAnsi(value: string) {
+  const ansiPattern = new RegExp(`${String.raw`\u001b`}\\[[0-?]*[ -/]*[@-~]`, 'g');
+  return value.replace(ansiPattern, '');
+}
+
+function parseShortstatLine(line: string): { additions: number; deletions: number } {
+  const addMatch = line.match(/(\d+)\s+insertion/);
+  const delMatch = line.match(/(\d+)\s+deletion/);
+  return {
+    additions: addMatch ? Number.parseInt(addMatch[1], 10) || 0 : 0,
+    deletions: delMatch ? Number.parseInt(delMatch[1], 10) || 0 : 0,
+  };
+}
+
+function parseGitStatusOutput(output: string): GitStatus {
+  const rawLines = output.split(/\r?\n/);
+  const lines: string[] = [];
+  for (const line of rawLines) {
+    const cleanLine = stripAnsi(line).replace(/\r/g, '');
+    if (!cleanLine) continue;
+    lines.push(cleanLine);
+  }
+
+  let branch: GitBranchInfo = {
+    branch: '(detached)',
+    ahead: 0,
+    behind: 0,
+  };
+  const entries: GitFileStatus[] = [];
+  let inDiffStat = false;
+  let totalAdditions = 0;
+  let totalDeletions = 0;
+
+  for (let index = 0; index < lines.length; index += 1) {
+    const line = lines[index] ?? '';
+
+    if (line === '##DIFFSTAT') {
+      inDiffStat = true;
+      continue;
+    }
+
+    if (inDiffStat) {
+      const stat = parseShortstatLine(line);
+      totalAdditions += stat.additions;
+      totalDeletions += stat.deletions;
+      continue;
+    }
+
+    const branchMarkerIndex = line.indexOf('## ');
+    if (branchMarkerIndex >= 0) {
+      branch = parseGitStatusBranch(line.slice(branchMarkerIndex));
+      continue;
+    }
+    const statusMatch = line.match(/([ MADRC?])([ MADRC?]) (.+)$/);
+    if (!statusMatch) continue;
+
+    const x = normalizeGitStatusCode(statusMatch[1] ?? '');
+    const y = normalizeGitStatusCode(statusMatch[2] ?? '');
+    const rest = statusMatch[3] ?? '';
+    if (!rest) continue;
+
+    const arrowIndex = rest.indexOf(' -> ');
+    if ((x === 'R' || x === 'C') && arrowIndex >= 0) {
+      const origPath = rest.slice(0, arrowIndex);
+      const newPath = rest.slice(arrowIndex + 4);
+      entries.push({
+        path: newPath,
+        index: x,
+        worktree: y,
+        origPath,
+      });
+      continue;
+    }
+
+    entries.push({
+      path: rest,
+      index: x,
+      worktree: y,
+    });
+  }
+
+  return {
+    branch,
+    files: entries,
+    diffStats: { additions: totalAdditions, deletions: totalDeletions },
+  };
+}
+
+function setGitStatus(next: GitStatus | null) {
+  gitStatus.value = next;
+  if (!next) {
+    gitStatusByPath.value = {};
     return;
   }
-  const directory = options.activeDirectory.value.trim();
+  const byPath: Record<string, GitFileStatus> = {};
+  next.files.forEach((entry) => {
+    byPath[entry.path] = entry;
+  });
+  gitStatusByPath.value = byPath;
+}
+
+async function refreshGitStatus() {
+  const { activeDirectory } = getOptions();
+  const directory = activeDirectory.value.trim();
+  if (!directory) {
+    setGitStatus(null);
+    return;
+  }
+
+  const { runOneShotPtyCommand } = usePtyOneshot();
   try {
-    const data = await opencodeApi.getSessionDiff({
-      sessionID: sessionId,
-      directory,
-    });
-    if (requestId !== sessionDiffRequestId) return;
-    if (options.selectedSessionId.value !== sessionId) return;
-    if (options.activeDirectory.value.trim() !== directory) return;
-    const entries = Array.isArray(data) ? normalizeSessionDiffEntries(data) : [];
-    updateSessionDiffState(entries);
-  } catch {
-    if (requestId !== sessionDiffRequestId) return;
-    if (options.selectedSessionId.value !== sessionId) return;
-    if (options.activeDirectory.value.trim() !== directory) return;
-    updateSessionDiffState([]);
+    const output = await runOneShotPtyCommand('bash', [
+      '--noprofile',
+      '--norc',
+      '-c',
+      GIT_STATUS_SCRIPT,
+    ]);
+    if (activeDirectory.value.trim() !== directory) return;
+    const parsed = parseGitStatusOutput(output);
+    const filesByPath = new Map(parsed.files.map((entry) => [entry.path, entry]));
+    parsed.files = Array.from(filesByPath.values()).sort((a, b) => a.path.localeCompare(b.path));
+    setGitStatus(parsed);
+  } catch (error) {
+    if (activeDirectory.value.trim() !== directory) return;
+    void error;
   }
 }
 
@@ -351,9 +489,8 @@ function toggleTreeDirectory(path: string) {
     next.delete(path);
     expandedTreePathSet.value = next;
     return;
-  } else {
-    next.add(path);
   }
+  next.add(path);
   expandedTreePathSet.value = next;
   const node = findTreeNodeByPath(treeNodes.value, path);
   if (node?.loaded) return;
@@ -386,11 +523,12 @@ async function loadSingleDirectory(path: string) {
     const mergedChildren = mergeTreeNodeChildren(parent?.children ?? [], children);
     treeNodes.value = updateTreeNodeChildren(treeNodes.value, path, mergedChildren);
     replaceDirectoryFilesInCache(path, mergedChildren);
-  } catch {}
+  } catch (error) {
+    void error;
+  }
 }
 
 function feed(packet: FileWatcherUpdatedPacket) {
-  if (packet.event === 'change') return;
   const options = getOptions();
   const directory = options.activeDirectory.value.trim();
   if (!directory) return;
@@ -410,7 +548,10 @@ function feed(packet: FileWatcherUpdatedPacket) {
     }
   }
 
-  scheduleDirectoryReload(parentDirectoryPath(relativePath));
+  if (packet.event !== 'change') {
+    scheduleDirectoryReload(parentDirectoryPath(relativePath));
+  }
+  scheduleGitStatusReload();
 }
 
 async function rebuildFileCache() {
@@ -485,10 +626,12 @@ async function reloadTree() {
 function initializeFileTree(options: UseFileTreeOptions) {
   if (boundOptions) return;
   boundOptions = options;
+  usePtyOneshot({ activeDirectory: options.activeDirectory });
   watch(
     () => options.activeDirectory.value,
     (directory) => {
       clearScheduledDirectoryReloads();
+      clearScheduledGitStatusReload();
       const activePath = directory.trim();
       if (!activePath) {
         treeNodes.value = [];
@@ -496,12 +639,13 @@ function initializeFileTree(options: UseFileTreeOptions) {
         selectedTreePath.value = '';
         treeError.value = '';
         treeLoading.value = false;
-        updateSessionDiffState([]);
         files.value = [];
         fileCacheVersion.value += 1;
+        setGitStatus(null);
         return;
       }
       void reloadTree();
+      void refreshGitStatus();
     },
     { immediate: true },
   );
@@ -520,17 +664,14 @@ export function useFileTree(options?: UseFileTreeOptions) {
     selectedTreePath,
     treeLoading,
     treeError,
-    sessionStatusByPath,
-    sessionDiffEntries,
-    sessionDiffByPath,
+    gitStatus,
+    gitStatusByPath,
     files,
     fileCacheVersion,
     reloadTree,
-    refreshSessionDiff,
+    refreshGitStatus,
     toggleTreeDirectory,
     selectTreeFile,
     feed,
-    updateSessionDiffState,
-    normalizeSessionDiffEntries,
   };
 }

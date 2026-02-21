@@ -40,10 +40,13 @@
         :selected-path="selectedTreePath"
         :is-loading="treeLoading"
         :error="treeError"
-        :status-by-path="treeStatusByPath"
+        :git-status-by-path="treeStatusByPath"
+        :branch-info="treeBranchInfo"
+        :diff-stats="treeDiffStats"
         @toggle-dir="(path) => emit('toggle-dir', path)"
         @select-file="(path) => emit('select-file', path)"
-        @open-diff="(path) => emit('open-diff', path)"
+        @open-diff="(payload) => emit('open-diff', payload)"
+        @open-diff-all="emit('open-diff-all')"
         @open-file="(path) => emit('open-file', path)"
       />
     </div>
@@ -54,7 +57,12 @@
 import { toRefs } from 'vue';
 import { Icon } from '@iconify/vue';
 import TodoList from './TodoList.vue';
-import TreeView, { type TreeNode } from './TreeView.vue';
+import TreeView, {
+  type GitBranchInfo,
+  type GitDiffStats,
+  type GitFileStatus,
+  type TreeNode,
+} from './TreeView.vue';
 
 type TodoItem = {
   content: string;
@@ -71,8 +79,6 @@ type TodoPanelSession = {
   error: string | undefined;
 };
 
-type TreeStatus = 'added' | 'modified' | 'deleted';
-
 const props = defineProps<{
   collapsed: boolean;
   activeTab: 'todo' | 'tree';
@@ -82,7 +88,9 @@ const props = defineProps<{
   selectedTreePath?: string;
   treeLoading: boolean;
   treeError?: string;
-  treeStatusByPath: Record<string, TreeStatus>;
+  treeStatusByPath: Record<string, GitFileStatus>;
+  treeBranchInfo?: GitBranchInfo | null;
+  treeDiffStats?: GitDiffStats | null;
 }>();
 
 const emit = defineEmits<{
@@ -90,7 +98,8 @@ const emit = defineEmits<{
   (event: 'change-tab', value: 'todo' | 'tree'): void;
   (event: 'toggle-dir', path: string): void;
   (event: 'select-file', path: string): void;
-  (event: 'open-diff', path: string): void;
+  (event: 'open-diff', payload: { path: string; staged: boolean }): void;
+  (event: 'open-diff-all'): void;
   (event: 'open-file', path: string): void;
 }>();
 
@@ -109,6 +118,8 @@ const {
   treeLoading,
   treeError,
   treeStatusByPath,
+  treeBranchInfo,
+  treeDiffStats,
 } = toRefs(props);
 </script>
 
