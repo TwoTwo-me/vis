@@ -552,15 +552,18 @@ export function extractFileRead(
       }
       case 'edit': {
         if (status === 'running') return null;
-        const diff = typeof metadata?.diff === 'string' ? metadata.diff : '';
-        if (!diff) return null;
-        const editPath = helpers.resolveReadWritePath(input, metadata, state);
         const filediff =
           metadata?.filediff && typeof metadata.filediff === 'object'
             ? (metadata.filediff as Record<string, unknown>)
             : undefined;
         const editCode = typeof filediff?.before === 'string' ? filediff.before : undefined;
         const editAfter = typeof filediff?.after === 'string' ? filediff.after : undefined;
+        const diff =
+          editCode !== undefined && editAfter !== undefined
+            ? ''
+            : (typeof metadata?.diff === 'string' ? metadata.diff : '');
+        if (!diff && editAfter === undefined) return null;
+        const editPath = helpers.resolveReadWritePath(input, metadata, state);
         const editLang = helpers.guessLanguageFromPath(editPath);
         return {
           content: helpers.renderEditDiffHtml({
