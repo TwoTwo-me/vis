@@ -11,13 +11,15 @@ defineProps<{
   theme: string;
 }>();
 
+const origin = window.location.origin;
+
 const markdown = `\
 # How To Use \`OpenCode Visualizer\`
 
 Start the OpenCode server with CORS enabled:
 
 \`\`\`bash
-opencode serve --cors https://xenodrive.github.io
+opencode serve --cors ${origin}
 \`\`\`
 
 or add this to your \`.config/opencode/opencode.json\`:
@@ -26,7 +28,7 @@ or add this to your \`.config/opencode/opencode.json\`:
 {
   "$schema": "https://opencode.ai/config.json",
   "server": {
-    "cors": ["https://xenodrive.github.io"]
+    "cors": ["${origin}"]
   }
 }
 \`\`\`
