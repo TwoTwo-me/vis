@@ -26,7 +26,16 @@
           @dropdown-closed="focusInput"
         />
       </header>
-      <div ref="appBodyEl" class="app-body" :class="{ 'todo-collapsed': sidePanelCollapsed }" :style="sidePanelWidth !== null ? { '--todo-panel-width': `${sidePanelWidth}px` } as any : undefined">
+      <div
+        ref="appBodyEl"
+        class="app-body"
+        :class="{ 'todo-collapsed': sidePanelCollapsed }"
+        :style="
+          sidePanelWidth !== null
+            ? ({ '--todo-panel-width': `${sidePanelWidth}px` } as any)
+            : undefined
+        "
+      >
         <div ref="sidePanelAreaEl" class="side-panel-area">
           <SidePanel
             class="todo-panel"
@@ -53,7 +62,11 @@
             "
             @open-file="openFileViewer"
           />
-          <div v-if="!sidePanelCollapsed" class="side-resizer" @pointerdown="startSidePanelResize"></div>
+          <div
+            v-if="!sidePanelCollapsed"
+            class="side-resizer"
+            @pointerdown="startSidePanelResize"
+          ></div>
         </div>
         <div class="app-main-column">
           <main ref="outputEl" class="app-output">
@@ -91,18 +104,6 @@
                     @content-resized="handleOutputPanelContentResized"
                     @initial-render-complete="handleOutputPanelInitialRenderComplete"
                   />
-                </div>
-                <div ref="toolWindowCanvasEl" class="tool-window-canvas">
-                  <TransitionGroup appear name="scale">
-                    <FloatingWindow
-                      v-for="entry in fw.entries.value"
-                      :key="entry.key"
-                      :entry="entry"
-                      :manager="fw"
-                      @focus="fw.bringToFront(entry.key)"
-                      @close="handleFloatingWindowClose(entry.key)"
-                    />
-                  </TransitionGroup>
                 </div>
               </div>
             </div>
@@ -146,6 +147,18 @@
               @open-image="handleOpenImage"
             />
           </footer>
+        </div>
+        <div ref="toolWindowCanvasEl" class="tool-window-canvas">
+          <TransitionGroup appear name="scale">
+            <FloatingWindow
+              v-for="entry in fw.entries.value"
+              :key="entry.key"
+              :entry="entry"
+              :manager="fw"
+              @focus="fw.bringToFront(entry.key)"
+              @close="handleFloatingWindowClose(entry.key)"
+            />
+          </TransitionGroup>
         </div>
       </div>
     </template>
@@ -1917,7 +1930,17 @@ function handleWindowResize() {
 
 function syncFloatingExtent() {
   const canvas = toolWindowCanvasEl.value;
-  if (!canvas) return;
+  const header = document.querySelector('.app-header') as HTMLElement | null;
+  const input = inputEl.value;
+  if (!canvas || !header || !input) return;
+  const headerRect = header.getBoundingClientRect();
+  const inputRect = input.getBoundingClientRect();
+  const headerBottom = headerRect.bottom;
+  const inputTop = inputRect.top;
+  const topOffset = Math.max(0, headerBottom);
+  const availableHeight = Math.max(0, inputTop - headerBottom);
+  canvas.style.setProperty('--canvas-top', `${topOffset}px`);
+  canvas.style.setProperty('--canvas-height', `${availableHeight}px`);
   const rect = canvas.getBoundingClientRect();
   fw.setExtent(rect.width, rect.height);
 }
@@ -5661,6 +5684,7 @@ onBeforeUnmount(() => {
 }
 
 .app-body {
+  position: relative;
   flex: 1 1 auto;
   min-height: 0;
   display: flex;
@@ -5708,7 +5732,6 @@ onBeforeUnmount(() => {
   align-items: center;
   justify-content: center;
   cursor: ew-resize;
-  z-index: 40;
   touch-action: none;
 }
 
@@ -5731,16 +5754,17 @@ onBeforeUnmount(() => {
 }
 
 .tool-window-canvas {
-  position: absolute;
-  inset: 0;
-  width: 100%;
-  height: 100%;
+  position: fixed;
+  top: var(--canvas-top, 0px);
+  left: 0;
+  width: 100vw;
+  height: var(--canvas-height, 100%);
   pointer-events: none;
   overflow: visible;
   z-index: 20;
   --dock-reserved: 0px;
   --tool-top-offset: 0px;
-  --tool-area-height: 100%;
+  --tool-area-height: var(--canvas-height, 100%);
   --term-font-family:
     'Iosevka Term', 'Iosevka Fixed', 'JetBrains Mono', 'Cascadia Mono', 'SFMono-Regular', Menlo,
     Consolas, 'Liberation Mono', monospace;
