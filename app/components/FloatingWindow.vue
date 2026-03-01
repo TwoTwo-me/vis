@@ -147,6 +147,15 @@ let dragX = 0;
 let dragY = 0;
 let dragTarget: HTMLElement | null = null;
 let dragPointerId = -1;
+const TITLEBAR_VISIBLE_PX = 32;
+
+function getAxisBounds(extentSize: number, windowSize: number, visibleSize: number) {
+  const keepVisible = Math.max(1, Math.min(visibleSize, windowSize, extentSize));
+  return {
+    min: keepVisible - windowSize,
+    max: extentSize - keepVisible,
+  };
+}
 
 function applyTransform(x: number, y: number) {
   const el = windowEl.value;
@@ -166,7 +175,17 @@ function getDragBounds() {
   const extent = props.manager.getExtent();
   const w = props.entry.width || 600;
   const h = props.entry.height || 400;
-  return { minX: 0, maxX: extent.width - w, minY: 0, maxY: extent.height - h, w, h, extent };
+  const xBounds = getAxisBounds(extent.width, w, TITLEBAR_VISIBLE_PX);
+  const keepVisibleY = Math.max(1, Math.min(TITLEBAR_VISIBLE_PX, extent.height));
+  return {
+    minX: xBounds.min,
+    maxX: xBounds.max,
+    minY: 0,
+    maxY: extent.height - keepVisibleY,
+    w,
+    h,
+    extent,
+  };
 }
 
 function onDragStart(e: PointerEvent) {

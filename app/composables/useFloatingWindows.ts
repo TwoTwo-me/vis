@@ -38,6 +38,7 @@ export type Extent = { width: number; height: number };
 
 const TOOL_RUNNING_TTL_MS = 1000 * 60 * 10;
 const TOOL_COMPLETED_TTL_MS = 2000;
+const TITLEBAR_VISIBLE_PX = 32;
 
 const DEFAULT_OPTS: Partial<FloatingWindowEntry> = {
   closable: false,
@@ -63,6 +64,14 @@ function isManualTier(key: string, closable?: boolean): boolean {
 
 function nextZIndex(manualTier: boolean): number {
   return ++zIndexCounter + (manualTier ? MANUAL_ZINDEX_OFFSET : 0);
+}
+
+function getAxisBounds(extentSize: number, windowSize: number, visibleSize: number) {
+  const keepVisible = Math.max(1, Math.min(visibleSize, windowSize, extentSize));
+  return {
+    min: keepVisible - windowSize,
+    max: extentSize - keepVisible,
+  };
 }
 
 function variantToGutterMode(variant?: string): 'none' | 'single' | 'double' {
@@ -190,10 +199,11 @@ export function useFloatingWindows() {
     }
 
     // Clamp position to visible bounds
-    const clampMaxX = Math.max(0, extent.width - (merged.width ?? 600));
-    const clampMaxY = Math.max(0, extent.height - (merged.height ?? 400));
-    merged.x = Math.max(0, Math.min(merged.x, clampMaxX));
-    merged.y = Math.max(0, Math.min(merged.y, clampMaxY));
+    const windowWidth = merged.width ?? 600;
+    const xBounds = getAxisBounds(extent.width, windowWidth, TITLEBAR_VISIBLE_PX);
+    const keepVisibleY = Math.max(1, Math.min(TITLEBAR_VISIBLE_PX, extent.height));
+    merged.x = Math.max(xBounds.min, Math.min(merged.x, xBounds.max));
+    merged.y = Math.max(0, Math.min(merged.y, extent.height - keepVisibleY));
 
     // Execute beforeOpen hook
     if (merged.beforeOpen) {
