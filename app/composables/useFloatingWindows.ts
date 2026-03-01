@@ -23,6 +23,7 @@ export interface FloatingWindowEntry {
   resizable: boolean;
   scroll: 'follow' | 'force' | 'manual' | 'none';
   smoothEngine?: 'raf' | 'native';
+  focusOnOpen?: boolean;
   color?: string;
   time: number;
   expiry?: number;
@@ -248,6 +249,8 @@ export function useFloatingWindows() {
     // so the TTL countdown starts from display-ready, not before async work.
     merged.expiresAt = resolveExpiresAt(opts, existing);
 
+    const shouldFocusOnOpen = !existing && merged.focusOnOpen === true;
+
     entriesMap.set(key, sanitizeEntry(merged));
 
     scheduleExpiry(key, merged.expiresAt);
@@ -257,6 +260,16 @@ export function useFloatingWindows() {
       setTimeout(() => {
         const el = document.querySelector(`[data-floating-key="${key}"]`);
         if (el) merged.afterOpen!(el as HTMLElement);
+      }, 0);
+    }
+
+    if (shouldFocusOnOpen) {
+      setTimeout(() => {
+        const body = document.querySelector(
+          `[data-floating-key="${key}"] .floating-window-body`,
+        ) as HTMLElement | null;
+        if (!body) return;
+        body.focus();
       }, 0);
     }
   }

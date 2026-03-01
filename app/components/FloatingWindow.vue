@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ref, computed, provide, watch, onBeforeUnmount } from 'vue';
+import { ref, computed, provide, watch, onBeforeUnmount, nextTick } from 'vue';
 import CodeContent from './CodeContent.vue';
 import { FLOATING_WINDOW_KEY, type FloatingWindowAPI } from '../composables/useFloatingWindow';
 import type { FloatingWindowEntry, useFloatingWindows } from '../composables/useFloatingWindows';
 import { useAutoScroller, type ScrollMode } from '../composables/useAutoScroller';
+import { useContentSearch } from '../composables/useContentSearch';
 import { Icon } from '@iconify/vue';
 
 const props = defineProps<{
@@ -18,6 +19,7 @@ const emit = defineEmits<{
 
 const windowEl = ref<HTMLElement>();
 const bodyEl = ref<HTMLElement>();
+const searchInputEl = ref<HTMLInputElement>();
 
 const scrollMode = computed<ScrollMode>(() => props.entry.scroll || 'manual');
 const { showResumeButton, isFollowing, resumeFollow, notifyContentChange } = useAutoScroller(
@@ -25,6 +27,13 @@ const { showResumeButton, isFollowing, resumeFollow, notifyContentChange } = use
   scrollMode,
   { smoothEngine: props.entry.smoothEngine },
 );
+const search = useContentSearch(bodyEl);
+
+const searchResultLabel = computed(() => {
+  if (search.query.value.length === 0) return '';
+  if (search.matchCount.value === 0 || search.currentIndex.value < 0) return 'No results';
+  return `${search.currentIndex.value + 1}/${search.matchCount.value}`;
+});
 
 function handleResumeFollowClick() {
   resumeFollow();
@@ -64,6 +73,7 @@ watch(
     pendingScrollTop = null;
     shouldRestoreScrollTop = false;
     notifyContentChange();
+    search.refresh();
   },
   { flush: 'post' },
 );
@@ -134,6 +144,76 @@ function onClose() {
 function onBodyClick() {
   if (bodyEl.value?.contains(document.activeElement)) return;
   bodyEl.value?.focus();
+}
+
+function openSearchMode() {
+  search.open();
+  nextTick(() => {
+    searchInputEl.value?.focus();
+    searchInputEl.value?.select();
+  });
+}
+
+function onBodyKeydown(event: KeyboardEvent) {
+  if (document.activeElement !== bodyEl.value) return;
+  const key = event.key.toLowerCase();
+
+  if (event.key === 'Escape' && search.isSearching.value) {
+    event.preventDefault();
+    event.stopPropagation();
+    search.close();
+    bodyEl.value?.focus();
+    return;
+  }
+
+  if (event.key === 'Escape' && props.entry.closable) {
+    event.preventDefault();
+    event.stopPropagation();
+    onClose();
+    return;
+  }
+
+  if (event.key === 'Enter' && search.isSearching.value) {
+    event.preventDefault();
+    if (event.shiftKey) search.prev();
+    else search.next();
+    return;
+  }
+
+  if (event.key === '/' && !event.ctrlKey && !event.metaKey && !event.altKey) {
+    event.preventDefault();
+    openSearchMode();
+    return;
+  }
+
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && key === 'f') {
+    event.preventDefault();
+    openSearchMode();
+  }
+}
+
+function onSearchKeydown(event: KeyboardEvent) {
+  const key = event.key.toLowerCase();
+
+  if ((event.ctrlKey || event.metaKey) && !event.altKey && key === 'f') {
+    event.preventDefault();
+    searchInputEl.value?.focus();
+    searchInputEl.value?.select();
+    return;
+  }
+
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    event.stopPropagation();
+    search.close();
+    nextTick(() => bodyEl.value?.focus());
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    if (event.shiftKey) search.prev();
+    else search.next();
+  }
 }
 
 // Drag handling — direct DOM manipulation to avoid triggering Vue restyle
@@ -300,6 +380,7 @@ function snapBack() {
 onBeforeUnmount(() => {
   cancelSnapAnimation();
   cleanupDrag();
+  search.close();
 });
 
 watch(
@@ -369,6 +450,7 @@ function onResizeEnd(e: PointerEvent) {
         ref="bodyEl"
         tabindex="-1"
         @click="onBodyClick"
+        @keydown="onBodyKeydown"
       >
         <template v-if="entry.component">
           <component :is="entry.component" v-bind="entry.props || {}" />
@@ -390,6 +472,42 @@ function onResizeEnd(e: PointerEvent) {
       </Transition>
     </div>
     <div v-if="entry.resizable" class="floating-window-resizer" @pointerdown="onResizeStart" />
+    <Transition name="search-bar">
+      <div v-if="search.isSearching.value" class="fw-search-bar" @pointerdown.stop>
+        <input
+          ref="searchInputEl"
+          v-model="search.query.value"
+          class="fw-search-input"
+          type="text"
+          spellcheck="false"
+          placeholder="Search"
+          @keydown="onSearchKeydown"
+        />
+        <span class="fw-search-count">{{ searchResultLabel }}</span>
+        <button
+          class="fw-search-btn"
+          type="button"
+          aria-label="Previous match"
+          @click="search.prev"
+        >
+          ▲
+        </button>
+        <button class="fw-search-btn" type="button" aria-label="Next match" @click="search.next">
+          ▼
+        </button>
+        <button
+          class="fw-search-btn"
+          type="button"
+          aria-label="Close search"
+          @click="
+            search.close();
+            bodyEl?.focus();
+          "
+        >
+          ×
+        </button>
+      </div>
+    </Transition>
   </div>
 </template>
 
@@ -405,14 +523,13 @@ function onResizeEnd(e: PointerEvent) {
   transform: translate3d(var(--win-x), var(--win-y), 0)
     scale(var(--win-scale-x), var(--win-scale-y));
   will-change: transform;
-  contain: layout paint;
+  contain: layout;
   display: flex;
   flex-direction: column;
   max-width: 100vw;
   background: color-mix(in srgb, var(--window-color, #3a4150) 12%, #1a1d24);
   border: 1px solid var(--window-color, #3a4150);
   border-radius: 5px;
-  overflow: hidden;
   font-family: var(--term-font-family, monospace);
   font-size: var(--term-font-size, 14px);
   line-height: var(--term-line-height, 1.5);
@@ -431,6 +548,7 @@ function onResizeEnd(e: PointerEvent) {
   background: color-mix(in srgb, var(--window-color, #3a4150) 22%, rgba(36, 40, 50, 0.95));
   border-bottom: 1px solid
     color-mix(in srgb, var(--window-color, #3a4150) 35%, rgba(90, 100, 120, 0.35));
+  border-radius: 4px 4px 0 0;
   cursor: grab;
   user-select: none;
 }
@@ -464,6 +582,7 @@ function onResizeEnd(e: PointerEvent) {
   position: relative;
   overflow: hidden;
   min-height: 0;
+  border-radius: 0 0 4px 4px;
 }
 
 .floating-window-body {
@@ -511,6 +630,82 @@ function onResizeEnd(e: PointerEvent) {
 .fade-enter-from,
 .fade-leave-to {
   opacity: 0;
+}
+
+.search-bar-enter-active,
+.search-bar-leave-active {
+  transition:
+    transform 0.15s ease,
+    opacity 0.15s ease;
+}
+
+.search-bar-enter-from,
+.search-bar-leave-to {
+  opacity: 0;
+  transform: translateY(-6px);
+}
+
+.fw-search-bar {
+  position: absolute;
+  left: 0;
+  right: 0;
+  top: calc(100% + 1px);
+  z-index: 2;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 0 6px;
+  border: 1px solid var(--window-color, #3a4150);
+  border-top: none;
+  border-radius: 0 0 4px 4px;
+  background: rgba(20, 23, 30, 0.96);
+}
+
+.fw-search-input {
+  flex: 1;
+  min-width: 0;
+  height: 20px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  color: inherit;
+  font: inherit;
+  font-size: 12px;
+  line-height: 1;
+  padding: 0 6px;
+  outline: none;
+}
+
+.fw-search-input:focus {
+  border-color: rgba(96, 165, 250, 0.7);
+}
+
+.fw-search-count {
+  min-width: 48px;
+  text-align: right;
+  font-size: 11px;
+  color: #9ca3af;
+}
+
+.fw-search-btn {
+  width: 20px;
+  height: 20px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  background: transparent;
+  color: #cbd5e1;
+  font-size: 11px;
+  cursor: pointer;
+  line-height: 1;
+}
+
+.fw-search-btn:hover {
+  border-color: rgba(255, 255, 255, 0.18);
+  background: rgba(255, 255, 255, 0.08);
 }
 
 .floating-window-resizer {
