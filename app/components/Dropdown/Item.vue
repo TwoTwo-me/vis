@@ -93,7 +93,6 @@ a.ui-dropdown-item {
 }
 
 .ui-dropdown-item.is-disabled {
-  opacity: 0.6;
   cursor: default;
 }
 </style>

@@ -52,6 +52,9 @@
             :tree-branch-info="gitStatus?.branch"
             :tree-diff-stats="gitStatus?.diffStats"
             :tree-directory-name="treeDirectoryName"
+            :tree-branch-entries="branchEntries"
+            :tree-branch-list-loading="branchListLoading"
+            :run-shell-command="runTreeShellCommand"
             @toggle-collapse="toggleSidePanelCollapsed"
             @change-tab="setSidePanelTab"
             @toggle-dir="toggleTreeDirectory"
@@ -61,7 +64,6 @@
               (payload: { mode: WorktreeSnapshotMode }) => openAllGitDiff(payload.mode)
             "
             @open-file="openFileViewer"
-            @run-git-command="runTreeGitCommand"
             @reload="reloadTree().then(() => refreshGitStatus())"
           />
           <div
@@ -560,6 +562,7 @@ type ShellSession = {
   socket?: WebSocket;
   exiting?: boolean;
   closeOnSuccess?: boolean;
+  exitResolve?: (exitCode: number) => void;
 };
 
 type CommitSnapshotEntry = {
@@ -700,6 +703,7 @@ const composerDraftTabId =
     : `tab-${Date.now()}-${Math.random().toString(16).slice(2)}`;
 const shellSessionsByPtyId = new Map<string, ShellSession>();
 const pendingShellFits = new Set<string>();
+const shellExitWaiters = new Map<string, (exitCode: number) => void>();
 const ptyMetaDecoder = new TextDecoder();
 let floatingExtentResizeObserver: ResizeObserver | null = null;
 let floatingExtentObservedEl: HTMLDivElement | null = null;
@@ -1168,6 +1172,9 @@ const {
   toggleTreeDirectory,
   selectTreeFile,
   feed,
+  branchEntries,
+  branchListLoading,
+  refreshBranchEntries,
 } = useFileTree({ activeDirectory });
 
 const treeDirectoryName = computed(() => {
@@ -3099,6 +3106,7 @@ function removeShellWindow(ptyId: string, options?: { kill?: boolean }) {
   session.socket?.close();
   session.terminal.dispose();
   shellSessionsByPtyId.delete(ptyId);
+  shellExitWaiters.delete(ptyId);
   fw.close(`shell:${ptyId}`);
   if (options?.kill) {
     const directory = session.pty.cwd || activeDirectory.value || undefined;
@@ -3168,8 +3176,21 @@ async function openShellFromInput(input: string) {
   if (session) session.closeOnSuccess = true;
 }
 
-async function runTreeGitCommand(command: string) {
-  await openShellFromInput(command);
+async function runTreeShellCommand(command: string) {
+  const script = command.trim();
+  if (!script) return;
+  const pty = await createPtySession('/bin/sh', ['-c', script]);
+  if (!pty) return;
+  ensureShellWindow(pty);
+  const session = shellSessionsByPtyId.get(pty.id);
+  if (session) session.closeOnSuccess = true;
+  const exitCode = await new Promise<number>((resolve) => {
+    shellExitWaiters.set(pty.id, resolve);
+  });
+  if (exitCode === 0) {
+    void refreshGitStatus();
+    void refreshBranchEntries();
+  }
 }
 
 function decodeCommitSnapshotBase64(value: string) {
@@ -5156,9 +5177,14 @@ function handlePtyEvent(event: {
   if (!ptyId) return;
   if (!shellSessionsByPtyId.has(ptyId)) return;
   if (event.type === 'pty.exited') {
+    const exitCode = typeof event.exitCode === 'number' ? event.exitCode : -1;
+    const waiter = shellExitWaiters.get(ptyId);
+    if (waiter) {
+      shellExitWaiters.delete(ptyId);
+      waiter(exitCode);
+    }
     const session = shellSessionsByPtyId.get(ptyId);
-    if (session?.closeOnSuccess && event.exitCode !== 0) {
-      const exitCode = typeof event.exitCode === 'number' ? event.exitCode : -1;
+    if (session?.closeOnSuccess && exitCode !== 0) {
       session.terminal.write(`\r\n\u001b[31m[Command failed: ${exitCode}]\u001b[0m\r\n`);
       return;
     }

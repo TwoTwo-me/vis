@@ -69,10 +69,13 @@ function onKeydown(e: KeyboardEvent) {
   flex: 1;
   min-width: 0;
   border: 1px solid #334155;
+  border-radius: 5px;
+  padding: 4px 10px;
   background: rgba(30, 41, 59, 0.55);
   color: #e2e8f0;
   outline: none;
   box-sizing: border-box;
+  font-size: 12px;
 }
 
 .ui-dropdown-search-input:focus {

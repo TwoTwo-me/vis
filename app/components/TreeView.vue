@@ -2,10 +2,128 @@
   <div class="tree-view">
     <div class="tree-header">
       <div class="tree-branch">
-        <span class="tree-branch-label" :title="branchTitle">
-          <Icon :icon="branchIcon" :width="13" :height="13" class="tree-branch-icon" />
-          <span class="tree-branch-name">{{ branchName }}</span>
-        </span>
+        <Dropdown
+          v-model:open="branchMenuOpen"
+          class="tree-branch-picker-dropdown"
+          auto-close
+          :popup-style="{ width: '360px' }"
+          @select="onBranchSelect"
+        >
+          <template #trigger>
+            <button
+              type="button"
+              class="tree-branch-label tree-branch-picker-trigger"
+              :title="branchTitle"
+              @click.stop="onBranchPickerToggle"
+            >
+              <Icon :icon="branchIcon" :width="13" :height="13" class="tree-branch-icon" />
+              <span class="tree-branch-name">{{ branchName }}</span>
+              <Icon
+                icon="lucide:chevron-down"
+                :width="11"
+                :height="11"
+                class="tree-branch-chevron"
+              />
+            </button>
+          </template>
+          <DropdownSearch v-model="branchSearchQuery" placeholder="Search branches" />
+          <div v-if="branchListLoading" class="tree-branch-menu-empty">Loading branches...</div>
+          <template v-else>
+            <DropdownLabel v-if="filteredLocalBranches.length > 0">Local</DropdownLabel>
+            <DropdownItem
+              v-for="entry in filteredLocalBranches"
+              :key="entry.refname"
+              :value="branchSwitchCommand(entry)"
+              :disabled="isBranchSwitchDisabled(entry)"
+              :title="branchDisabledReason(entry)"
+            >
+              <div class="tree-branch-menu-row">
+                <div
+                  class="tree-branch-menu-content"
+                  :class="{ 'is-muted': isBranchSwitchDisabled(entry) }"
+                >
+                  <div class="tree-branch-menu-line1">
+                    <Icon
+                      v-if="entry.isCurrent"
+                      icon="lucide:check"
+                      :width="12"
+                      :height="12"
+                      class="tree-branch-current-icon"
+                    />
+                    <span v-else class="tree-branch-current-spacer"></span>
+                    <span class="tree-branch-menu-name">{{ entry.displayName }}</span>
+                  </div>
+                  <div class="tree-branch-menu-line2">
+                    <span class="tree-branch-current-spacer"></span>
+                    <span class="tree-branch-menu-meta" :title="branchSummary(entry)">
+                      {{ branchSummary(entry) }}
+                    </span>
+                  </div>
+                </div>
+                <div class="tree-branch-menu-actions">
+                  <button
+                    type="button"
+                    class="tree-branch-action-btn"
+                    title="Create branch from this ref"
+                    @click.stop="onBranchFork(entry)"
+                  >
+                    <Icon icon="lucide:git-branch-plus" :width="12" :height="12" />
+                  </button>
+                  <button
+                    v-if="canDeleteLocalBranch(entry)"
+                    type="button"
+                    class="tree-branch-action-btn tree-branch-delete-btn"
+                    title="Delete local branch"
+                    @click.stop="onBranchDelete(entry)"
+                  >
+                    <Icon icon="lucide:trash-2" :width="12" :height="12" />
+                  </button>
+                  <span v-else class="tree-branch-action-spacer"></span>
+                </div>
+              </div>
+            </DropdownItem>
+            <template v-for="group in filteredRemoteBranchGroups" :key="group.key">
+              <DropdownLabel>{{ group.label }}</DropdownLabel>
+              <DropdownItem
+                v-for="entry in group.entries"
+                :key="entry.refname"
+                :value="branchSwitchCommand(entry)"
+                :disabled="isBranchSwitchDisabled(entry)"
+                :title="branchDisabledReason(entry)"
+              >
+                <div class="tree-branch-menu-row">
+                  <div
+                    class="tree-branch-menu-content"
+                    :class="{ 'is-muted': isBranchSwitchDisabled(entry) }"
+                  >
+                    <div class="tree-branch-menu-line1">
+                      <span class="tree-branch-current-spacer"></span>
+                      <span class="tree-branch-menu-name">{{ entry.displayName }}</span>
+                    </div>
+                    <div class="tree-branch-menu-line2">
+                      <span class="tree-branch-current-spacer"></span>
+                      <span class="tree-branch-menu-meta" :title="branchSummary(entry)">
+                        {{ branchSummary(entry) }}
+                      </span>
+                    </div>
+                  </div>
+                  <div class="tree-branch-menu-actions">
+                    <button
+                      type="button"
+                      class="tree-branch-action-btn"
+                      title="Create branch from this ref"
+                      @click.stop="onBranchFork(entry)"
+                    >
+                      <Icon icon="lucide:git-branch-plus" :width="12" :height="12" />
+                    </button>
+                    <span class="tree-branch-action-spacer"></span>
+                  </div>
+                </div>
+              </DropdownItem>
+            </template>
+            <div v-if="!hasFilteredBranches" class="tree-branch-menu-empty">No branches found.</div>
+          </template>
+        </Dropdown>
         <Dropdown
           v-if="branchInfo && branchInfo.ahead > 0"
           v-model:open="pushMenuOpen"
@@ -182,8 +300,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
 import { Icon } from '@iconify/vue';
+import type { BranchEntry } from '../composables/useFileTree';
 import Dropdown from './Dropdown.vue';
 import DropdownItem from './Dropdown/Item.vue';
+import DropdownLabel from './Dropdown/Label.vue';
+import DropdownSearch from './Dropdown/Search.vue';
 
 export type TreeNode = {
   name: string;
@@ -228,6 +349,12 @@ type DisplayStatus = {
   staged: boolean;
 };
 
+type BranchGroup = {
+  key: string;
+  label: string;
+  entries: BranchEntry[];
+};
+
 const props = defineProps<{
   rootNodes: TreeNode[];
   expandedPaths: string[];
@@ -238,6 +365,9 @@ const props = defineProps<{
   branchInfo?: GitBranchInfo | null;
   diffStats?: GitDiffStats | null;
   directoryName?: string;
+  branchEntries?: BranchEntry[];
+  branchListLoading?: boolean;
+  runShellCommand?: (command: string) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -246,11 +376,12 @@ const emit = defineEmits<{
   (event: 'open-diff', payload: { path: string; staged: boolean }): void;
   (event: 'open-diff-all', payload: { mode: 'staged' | 'changes' | 'all' }): void;
   (event: 'open-file', path: string): void;
-  (event: 'run-git-command', command: string): void;
   (event: 'reload'): void;
 }>();
 
 const viewMode = ref<TreeViewMode>('all');
+const branchMenuOpen = ref(false);
+const branchSearchQuery = ref('');
 const pushMenuOpen = ref(false);
 const pullMenuOpen = ref(false);
 const expanded = computed(() => new Set(props.expandedPaths));
@@ -267,6 +398,36 @@ const branchTitle = computed(() => {
   const tracking = info.upstream ? ` tracking ${info.upstream}` : '';
   return `${info.branch}${head}${tracking}`;
 });
+
+const filteredLocalBranches = computed(() => {
+  const query = branchSearchQuery.value.trim().toLowerCase();
+  const locals = (props.branchEntries ?? []).filter((entry) => entry.isLocal);
+  if (!query) return locals;
+  return locals.filter((entry) => branchSearchText(entry).includes(query));
+});
+
+const filteredRemoteBranchGroups = computed<BranchGroup[]>(() => {
+  const query = branchSearchQuery.value.trim().toLowerCase();
+  const groups = new Map<string, BranchEntry[]>();
+  (props.branchEntries ?? []).forEach((entry) => {
+    if (entry.isLocal) return;
+    if (query && !branchSearchText(entry).includes(query)) return;
+    const group = groups.get(entry.remote) ?? [];
+    group.push(entry);
+    groups.set(entry.remote, group);
+  });
+  return Array.from(groups, ([key, entries]) => ({
+    key,
+    label: `Remote: ${key}`,
+    entries,
+  }));
+});
+
+const hasFilteredBranches = computed(
+  () =>
+    filteredLocalBranches.value.length > 0 ||
+    filteredRemoteBranchGroups.value.some((group) => group.entries.length > 0),
+);
 
 const activeDiffStats = computed((): GitDiffStatsEntry | null => {
   const stats = props.diffStats;
@@ -523,13 +684,85 @@ function onDiffStatsClick() {
   emit('open-diff-all', { mode: viewMode.value });
 }
 
+function shellQuote(value: string) {
+  return `'${value.replace(/'/g, `'"'"'`)}'`;
+}
+
+function branchSearchText(entry: BranchEntry) {
+  return `${entry.displayName} ${entry.refnameShort} ${entry.hash} ${entry.subject}`.toLowerCase();
+}
+
+function branchSummary(entry: BranchEntry) {
+  return entry.subject ? `${entry.hash} ${entry.subject}` : entry.hash;
+}
+
+function branchSwitchCommand(entry: BranchEntry) {
+  if (!entry.isLocal) {
+    return `git switch --track ${shellQuote(entry.refnameShort)}`;
+  }
+  return `git switch ${shellQuote(entry.displayName)}`;
+}
+
+function isBranchSwitchDisabled(entry: BranchEntry) {
+  if (entry.isCurrent) return true;
+  if (entry.isWorktree) return true;
+  if (!entry.isLocal && entry.hasLocalCounterpart) return true;
+  return false;
+}
+
+function branchDisabledReason(entry: BranchEntry) {
+  if (entry.isCurrent) return 'Already on this branch';
+  if (entry.isWorktree) return 'Branch is already used by another worktree';
+  if (!entry.isLocal && entry.hasLocalCounterpart) {
+    return 'A local branch with the same name already exists';
+  }
+  return '';
+}
+
+function canDeleteLocalBranch(entry: BranchEntry) {
+  return entry.isLocal && !entry.isCurrent && !entry.isWorktree;
+}
+
+function onBranchPickerToggle() {
+  branchMenuOpen.value = !branchMenuOpen.value;
+  if (!branchMenuOpen.value) return;
+  branchSearchQuery.value = '';
+}
+
+function onBranchSelect(value: unknown) {
+  if (typeof value !== 'string') return;
+  if (!value.trim()) return;
+  void props.runShellCommand?.(value);
+}
+
+function onBranchFork(entry: BranchEntry) {
+  if (typeof window === 'undefined') return;
+  const promptValue = window.prompt(`Create new branch from "${entry.refnameShort}"`);
+  const nextName = promptValue?.trim() ?? '';
+  if (!nextName) return;
+  branchMenuOpen.value = false;
+  void props.runShellCommand?.(
+    `git switch -c ${shellQuote(nextName)} ${shellQuote(entry.refnameShort)}`,
+  );
+}
+
+function onBranchDelete(entry: BranchEntry) {
+  if (!canDeleteLocalBranch(entry)) return;
+  if (typeof window !== 'undefined') {
+    const confirmed = window.confirm(`Delete local branch "${entry.displayName}"?`);
+    if (!confirmed) return;
+  }
+  branchMenuOpen.value = false;
+  void props.runShellCommand?.(`git branch -d ${shellQuote(entry.displayName)}`);
+}
+
 function onBranchCommandSelect(value: unknown) {
   if (typeof value !== 'string') return;
   if (typeof window !== 'undefined') {
     const confirmed = window.confirm(`Run "${value}"?`);
     if (!confirmed) return;
   }
-  emit('run-git-command', value);
+  void props.runShellCommand?.(value);
 }
 
 function onTreeScrollClick(event: MouseEvent) {
@@ -587,6 +820,140 @@ function onRowDoubleClick(row: { node: TreeNode }) {
   white-space: nowrap;
   overflow: hidden;
   min-height: 20px;
+}
+
+.tree-branch-picker-dropdown {
+  flex: 0 1 auto;
+  min-width: 0;
+}
+
+.tree-branch-picker-trigger {
+  border: 0;
+  background: transparent;
+  color: inherit;
+  padding: 0;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.tree-branch-picker-trigger:hover {
+  color: #cbd5e1;
+}
+
+.tree-branch-picker-trigger:focus-visible {
+  outline: 1px solid rgba(96, 165, 250, 0.7);
+  outline-offset: 1px;
+}
+
+.tree-branch-chevron {
+  color: #64748b;
+  flex-shrink: 0;
+}
+
+.tree-branch-menu-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  width: 100%;
+}
+
+.tree-branch-menu-content {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  flex: 1;
+}
+
+.tree-branch-menu-content.is-muted {
+  opacity: 0.5;
+}
+
+.tree-branch-menu-line1,
+.tree-branch-menu-line2 {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+}
+
+.tree-branch-current-icon {
+  color: #86efac;
+  flex-shrink: 0;
+}
+
+.tree-branch-current-spacer {
+  width: 12px;
+  height: 12px;
+  flex-shrink: 0;
+}
+
+.tree-branch-menu-name {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.tree-branch-menu-meta {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #64748b;
+  font-size: 10px;
+}
+
+.tree-branch-menu-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  flex: 0 0 auto;
+  align-self: center;
+}
+
+.tree-branch-action-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 4px;
+  padding: 0;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+}
+
+.tree-branch-action-btn:hover {
+  background: rgba(51, 65, 85, 0.55);
+  color: #cbd5e1;
+}
+
+.tree-branch-delete-btn {
+  color: #b08a8e;
+}
+
+.tree-branch-delete-btn:hover {
+  color: #fca5a5;
+}
+
+.tree-branch-action-spacer {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+}
+
+.tree-branch-menu-empty,
+.tree-branch-menu-error {
+  padding: 8px;
+  font-size: 11px;
+  color: #94a3b8;
+}
+
+.tree-branch-menu-error {
+  color: #fca5a5;
 }
 
 .tree-branch-command-dropdown {

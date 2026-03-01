@@ -44,12 +44,14 @@
         :branch-info="treeBranchInfo"
         :diff-stats="treeDiffStats"
         :directory-name="treeDirectoryName"
+        :branch-entries="treeBranchEntries"
+        :branch-list-loading="treeBranchListLoading"
+        :run-shell-command="runShellCommand"
         @toggle-dir="(path) => emit('toggle-dir', path)"
         @select-file="(path) => emit('select-file', path)"
         @open-diff="(payload) => emit('open-diff', payload)"
         @open-diff-all="(payload) => emit('open-diff-all', payload)"
         @open-file="(path) => emit('open-file', path)"
-        @run-git-command="(command) => emit('run-git-command', command)"
         @reload="emit('reload')"
       />
     </div>
@@ -60,6 +62,7 @@
 import { toRefs } from 'vue';
 import { Icon } from '@iconify/vue';
 import TodoList from './TodoList.vue';
+import type { BranchEntry } from '../composables/useFileTree';
 import TreeView, {
   type GitBranchInfo,
   type GitDiffStats,
@@ -95,6 +98,9 @@ const props = defineProps<{
   treeBranchInfo?: GitBranchInfo | null;
   treeDiffStats?: GitDiffStats | null;
   treeDirectoryName?: string;
+  treeBranchEntries?: BranchEntry[];
+  treeBranchListLoading?: boolean;
+  runShellCommand?: (command: string) => Promise<void>;
 }>();
 
 const emit = defineEmits<{
@@ -105,7 +111,6 @@ const emit = defineEmits<{
   (event: 'open-diff', payload: { path: string; staged: boolean }): void;
   (event: 'open-diff-all', payload: { mode: 'staged' | 'changes' | 'all' }): void;
   (event: 'open-file', path: string): void;
-  (event: 'run-git-command', command: string): void;
   (event: 'reload'): void;
 }>();
 
@@ -127,6 +132,9 @@ const {
   treeBranchInfo,
   treeDiffStats,
   treeDirectoryName,
+  treeBranchEntries,
+  treeBranchListLoading,
+  runShellCommand,
 } = toRefs(props);
 </script>
 

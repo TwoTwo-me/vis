@@ -65,6 +65,20 @@ export type GitDiffStats = {
   unstaged: GitDiffStatsEntry;
 };
 
+export type BranchEntry = {
+  refname: string;
+  refnameShort: string;
+  displayName: string;
+  hash: string;
+  subject: string;
+  isCurrent: boolean;
+  isWorktree: boolean;
+  isLocal: boolean;
+  remote: string;
+  upstream: string;
+  hasLocalCounterpart: boolean;
+};
+
 export type GitStatus = {
   branch: GitBranchInfo;
   files: GitFileStatus[];
@@ -86,6 +100,8 @@ const gitStatus = ref<GitStatus | null>(null);
 const gitStatusByPath = ref<Record<string, GitFileStatus>>({});
 const files = ref<string[]>([]);
 const fileCacheVersion = ref(0);
+const branchEntries = ref<BranchEntry[]>([]);
+const branchListLoading = ref(false);
 
 let fileCacheBuildId = 0;
 const DIRECTORY_RELOAD_DEBOUNCE_MS = 120;
@@ -93,6 +109,10 @@ const GIT_STATUS_RELOAD_DEBOUNCE_MS = 120;
 const scheduledDirectoryReloads = new Map<string, ReturnType<typeof setTimeout>>();
 let scheduledGitStatusReload: ReturnType<typeof setTimeout> | null = null;
 let gitStatusGeneration = 0;
+let branchListGeneration = 0;
+
+const BRANCH_LIST_FORMAT =
+  '%(refname)\t%(refname:short)\t%(HEAD)\t%(worktreepath)\t%(objectname:short)\t%(subject)\t%(upstream:short)';
 
 function getOptions(): UseFileTreeOptions {
   if (!boundOptions) {
@@ -531,6 +551,112 @@ async function refreshGitStatus() {
   }
 }
 
+function parseBranchEntries(output: string): BranchEntry[] {
+  const entries: BranchEntry[] = [];
+  const lines = output.split(/\r?\n/);
+
+  lines.forEach((line) => {
+    if (!line) return;
+    const parts = line.split('\t');
+    if (parts.length < 7) return;
+    const [refname = '', refnameShort = '', head = '', worktreePath = '', hash = '', ...rest] =
+      parts;
+    const upstream = rest.at(-1)?.trim() ?? '';
+    const subject = rest.slice(0, -1).join('\t').trim();
+
+    const headMark = head.trim();
+    const isCurrent = headMark === '*';
+    const isWorktree = worktreePath.trim().length > 0;
+
+    if (refname.startsWith('refs/heads/')) {
+      const displayName = refname.slice('refs/heads/'.length);
+      if (!displayName) return;
+      entries.push({
+        refname,
+        refnameShort,
+        displayName,
+        hash,
+        subject,
+        isCurrent,
+        isWorktree,
+        isLocal: true,
+        remote: '',
+        upstream,
+        hasLocalCounterpart: false,
+      });
+      return;
+    }
+
+    if (!refname.startsWith('refs/remotes/')) return;
+    const remoteRelative = refname.slice('refs/remotes/'.length);
+    const splitIndex = remoteRelative.indexOf('/');
+    if (splitIndex <= 0) return;
+    const remote = remoteRelative.slice(0, splitIndex);
+    const displayName = remoteRelative.slice(splitIndex + 1);
+    if (!displayName || displayName === 'HEAD') return;
+    entries.push({
+      refname,
+      refnameShort,
+      displayName,
+      hash,
+      subject,
+      isCurrent,
+      isWorktree,
+      isLocal: false,
+      remote,
+      upstream,
+      hasLocalCounterpart: false,
+    });
+  });
+
+  const localNames = new Set(
+    entries.filter((entry) => entry.isLocal).map((entry) => entry.displayName),
+  );
+
+  entries.forEach((entry) => {
+    if (entry.isLocal) return;
+    entry.hasLocalCounterpart = localNames.has(entry.displayName);
+  });
+
+  return entries;
+}
+
+async function refreshBranchEntries() {
+  const { activeDirectory } = getOptions();
+  const directory = activeDirectory.value.trim();
+  if (!directory) {
+    branchEntries.value = [];
+    return;
+  }
+
+  const generation = ++branchListGeneration;
+  branchListLoading.value = true;
+  const { runOneShotPtyCommand } = usePtyOneshot();
+  try {
+    const output = await runOneShotPtyCommand('git', [
+      '--no-pager',
+      '-c',
+      'color.ui=false',
+      '-c',
+      'color.branch=false',
+      'branch',
+      '--no-color',
+      '-a',
+      '--sort=-committerdate',
+      `--format=${BRANCH_LIST_FORMAT}`,
+    ]);
+    if (generation !== branchListGeneration) return;
+    branchEntries.value = parseBranchEntries(output);
+  } catch {
+    if (generation !== branchListGeneration) return;
+    branchEntries.value = [];
+  } finally {
+    if (generation === branchListGeneration) {
+      branchListLoading.value = false;
+    }
+  }
+}
+
 function toggleTreeDirectory(path: string) {
   const next = new Set(expandedTreePathSet.value);
   if (next.has(path)) {
@@ -690,10 +816,12 @@ function initializeFileTree(options: UseFileTreeOptions) {
         files.value = [];
         fileCacheVersion.value += 1;
         setGitStatus(null);
+        branchEntries.value = [];
         return;
       }
       void reloadTree();
       void refreshGitStatus();
+      void refreshBranchEntries();
     },
     { immediate: true },
   );
@@ -721,5 +849,8 @@ export function useFileTree(options?: UseFileTreeOptions) {
     toggleTreeDirectory,
     selectTreeFile,
     feed,
+    branchEntries,
+    branchListLoading,
+    refreshBranchEntries,
   };
 }
