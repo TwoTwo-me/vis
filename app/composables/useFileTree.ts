@@ -4,7 +4,7 @@ import type { FileWatcherUpdatedPacket } from '../types/sse';
 import * as opencodeApi from '../utils/opencode';
 import { usePtyOneshot } from './usePtyOneshot';
 
-const GIT_STATUS_SCRIPT = [
+const GIT_ENV_PREAMBLE = [
   'stty -opost -echo 2>/dev/null',
   'export GIT_PAGER=cat',
   'export GIT_TERMINAL_PROMPT=0',
@@ -12,13 +12,22 @@ const GIT_STATUS_SCRIPT = [
   'export GIT_CONFIG_NOSYSTEM=1',
   'export TERM=dumb',
   'git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0',
-  'git -c color.status=false -c color.ui=false --no-pager status --porcelain=v1 -sb 2>/dev/null',
-  'printf "##HEAD\\n"',
+].join('\n');
+
+const GIT_STATUS_SCRIPT = [
+  GIT_ENV_PREAMBLE,
+  'git -c color.status=false -c color.ui=false --no-pager status --porcelain=v1 -z -b 2>/dev/null',
+  "printf '\\0##HEAD\\0'",
   'git rev-parse --short HEAD 2>/dev/null',
-  'printf "##DIFFSTAT\\n"',
+  "printf '\\0##DIFFSTAT\\0'",
   'git diff --shortstat 2>/dev/null',
-  'printf "##DIFFSTAT_CACHED\\n"',
+  "printf '\\0##DIFFSTAT_CACHED\\0'",
   'git diff --cached --shortstat 2>/dev/null',
+].join('\n');
+
+const GIT_FILE_LIST_SCRIPT = [
+  GIT_ENV_PREAMBLE,
+  'git ls-files --cached --others --exclude-standard -z 2>/dev/null',
 ].join('\n');
 
 export type TreeNode = {
@@ -85,6 +94,8 @@ export type GitStatus = {
   diffStats: GitDiffStats;
 };
 
+type FileTreeStrategy = 'filesystem' | 'git';
+
 type UseFileTreeOptions = {
   activeDirectory: Ref<string>;
 };
@@ -102,6 +113,7 @@ const files = ref<string[]>([]);
 const fileCacheVersion = ref(0);
 const branchEntries = ref<BranchEntry[]>([]);
 const branchListLoading = ref(false);
+const fileTreeStrategy = ref<FileTreeStrategy>('filesystem');
 
 let fileCacheBuildId = 0;
 const DIRECTORY_RELOAD_DEBOUNCE_MS = 120;
@@ -110,6 +122,7 @@ const scheduledDirectoryReloads = new Map<string, ReturnType<typeof setTimeout>>
 let scheduledGitStatusReload: ReturnType<typeof setTimeout> | null = null;
 let gitStatusGeneration = 0;
 let branchListGeneration = 0;
+let gitFileListGeneration = 0;
 
 const BRANCH_LIST_FORMAT =
   '%(refname)\t%(refname:short)\t%(HEAD)\t%(worktreepath)\t%(objectname:short)\t%(subject)\t%(upstream:short)';
@@ -401,13 +414,8 @@ function parseShortstatLine(line: string): { additions: number; deletions: numbe
 }
 
 function parseGitStatusOutput(output: string): GitStatus {
-  const rawLines = output.split(/\r?\n/);
-  const lines: string[] = [];
-  for (const line of rawLines) {
-    const cleanLine = stripAnsi(line).replace(/\r/g, '');
-    if (!cleanLine) continue;
-    lines.push(cleanLine);
-  }
+  const cleaned = stripAnsi(output).replace(/\r/g, '');
+  const tokens = cleaned.split('\0');
 
   let branch: GitBranchInfo = {
     branch: '(detached)',
@@ -421,75 +429,83 @@ function parseGitStatusOutput(output: string): GitStatus {
   let unstagedDeletions = 0;
   let stagedAdditions = 0;
   let stagedDeletions = 0;
+  let pendingRename: { index: GitStatusCode; worktree: GitStatusCode; path: string } | null = null;
 
-  for (let index = 0; index < lines.length; index += 1) {
-    const line = lines[index] ?? '';
+  for (const rawToken of tokens) {
+    const trimmed = rawToken.trim();
+    if (!trimmed) continue;
 
-    if (line === '##HEAD') {
+    // Section markers (may contain embedded newlines from surrounding commands)
+    const stripped = trimmed.replace(/\n/g, '').trim();
+    if (stripped === '##HEAD') {
       section = 'head';
       continue;
     }
-    if (line === '##DIFFSTAT') {
+    if (stripped === '##DIFFSTAT') {
       section = 'diffstat';
       continue;
     }
-    if (line === '##DIFFSTAT_CACHED') {
+    if (stripped === '##DIFFSTAT_CACHED') {
       section = 'diffstat_cached';
       continue;
     }
 
     if (section === 'head') {
-      if (!headShort && /^[0-9a-f]+$/i.test(line)) {
-        headShort = line;
+      const lines = rawToken.split('\n');
+      for (const line of lines) {
+        const t = line.trim();
+        if (!headShort && /^[0-9a-f]+$/i.test(t)) {
+          headShort = t;
+        }
       }
       continue;
     }
 
-    if (section === 'diffstat') {
-      const stat = parseShortstatLine(line);
-      unstagedAdditions += stat.additions;
-      unstagedDeletions += stat.deletions;
+    if (section === 'diffstat' || section === 'diffstat_cached') {
+      const lines = rawToken.split('\n');
+      for (const line of lines) {
+        const stat = parseShortstatLine(line);
+        if (section === 'diffstat') {
+          unstagedAdditions += stat.additions;
+          unstagedDeletions += stat.deletions;
+        } else {
+          stagedAdditions += stat.additions;
+          stagedDeletions += stat.deletions;
+        }
+      }
       continue;
     }
 
-    if (section === 'diffstat_cached') {
-      const stat = parseShortstatLine(line);
-      stagedAdditions += stat.additions;
-      stagedDeletions += stat.deletions;
-      continue;
-    }
-
-    const branchMarkerIndex = line.indexOf('## ');
-    if (branchMarkerIndex >= 0) {
-      branch = parseGitStatusBranch(line.slice(branchMarkerIndex));
-      continue;
-    }
-    const statusMatch = line.match(/([ MADRC?])([ MADRC?]) (.+)$/);
-    if (!statusMatch) continue;
-
-    const x = normalizeGitStatusCode(statusMatch[1] ?? '');
-    const y = normalizeGitStatusCode(statusMatch[2] ?? '');
-    const rest = statusMatch[3] ?? '';
-    if (!rest) continue;
-
-    const arrowIndex = rest.indexOf(' -> ');
-    if ((x === 'R' || x === 'C') && arrowIndex >= 0) {
-      const origPath = rest.slice(0, arrowIndex);
-      const newPath = rest.slice(arrowIndex + 4);
+    // Use rawToken (not trimmed) — X can be space (e.g. " M path")
+    if (pendingRename) {
       entries.push({
-        path: newPath,
-        index: x,
-        worktree: y,
-        origPath,
+        path: pendingRename.path,
+        index: pendingRename.index,
+        worktree: pendingRename.worktree,
+        origPath: trimmed,
       });
+      pendingRename = null;
       continue;
     }
 
-    entries.push({
-      path: rest,
-      index: x,
-      worktree: y,
-    });
+    if (trimmed.startsWith('## ')) {
+      branch = parseGitStatusBranch(trimmed);
+      continue;
+    }
+
+    if (rawToken.length >= 4 && rawToken[2] === ' ') {
+      const x = normalizeGitStatusCode(rawToken[0]);
+      const y = normalizeGitStatusCode(rawToken[1]);
+      const path = rawToken.slice(3);
+      if (!path) continue;
+
+      if (x === 'R' || x === 'C') {
+        pendingRename = { index: x, worktree: y, path };
+        continue;
+      }
+
+      entries.push({ path, index: x, worktree: y });
+    }
   }
 
   if (headShort) {
@@ -506,6 +522,198 @@ function parseGitStatusOutput(output: string): GitStatus {
   };
 }
 
+function buildFullTreeFromPaths(allPaths: string[]): TreeNode[] {
+  function build(paths: string[], prefix: string): TreeNode[] {
+    const dirs = new Map<string, string[]>();
+    const fileNames: string[] = [];
+
+    for (const p of paths) {
+      const slashIndex = p.indexOf('/');
+      if (slashIndex < 0) {
+        fileNames.push(p);
+      } else {
+        const topName = p.slice(0, slashIndex);
+        const rest = p.slice(slashIndex + 1);
+        let bucket = dirs.get(topName);
+        if (!bucket) {
+          bucket = [];
+          dirs.set(topName, bucket);
+        }
+        bucket.push(rest);
+      }
+    }
+
+    const nodes: TreeNode[] = [];
+
+    for (const [name, childPaths] of dirs) {
+      const fullPath = prefix ? `${prefix}/${name}` : name;
+      nodes.push({
+        name,
+        path: fullPath,
+        type: 'directory',
+        children: build(childPaths, fullPath),
+        loaded: false,
+        ignored: false,
+        synthetic: false,
+      });
+    }
+
+    for (const name of fileNames) {
+      const fullPath = prefix ? `${prefix}/${name}` : name;
+      nodes.push({
+        name,
+        path: fullPath,
+        type: 'file',
+        loaded: false,
+        ignored: false,
+        synthetic: false,
+      });
+    }
+
+    return sortTreeNodes(nodes);
+  }
+
+  return build(allPaths, '');
+}
+
+async function detectFileTreeStrategy(directory: string): Promise<FileTreeStrategy> {
+  try {
+    const raw = await opencodeApi.getVcsInfo(directory);
+    if (!raw || typeof raw !== 'object') return 'filesystem';
+    const branch = (raw as Record<string, unknown>).branch;
+    if (typeof branch !== 'string' || !branch.trim()) return 'filesystem';
+    return 'git';
+  } catch {
+    return 'filesystem';
+  }
+}
+
+function deepMergeGitTree(existing: TreeNode[], incoming: TreeNode[]): TreeNode[] {
+  if (existing.length === 0) return incoming;
+  const existingByPath = new Map(existing.map((node) => [node.path, node]));
+  const incomingByPath = new Map(incoming.map((node) => [node.path, node]));
+
+  const merged = incoming.map((node) => {
+    const prev = existingByPath.get(node.path);
+    if (!prev || node.type !== 'directory' || prev.type !== 'directory') return node;
+
+    if (prev.loaded && Array.isArray(prev.children)) {
+      // Already expanded via /file — keep its children (includes ignored items)
+      return { ...node, children: prev.children, loaded: true };
+    }
+
+    // Not loaded, but recurse to preserve any loaded subdirectories deeper down
+    if (Array.isArray(prev.children) && Array.isArray(node.children)) {
+      return { ...node, children: deepMergeGitTree(prev.children, node.children) };
+    }
+
+    return node;
+  });
+
+  // Preserve existing nodes not in incoming (e.g., ignored root entries from /file)
+  for (const [path, node] of existingByPath) {
+    if (!incomingByPath.has(path)) {
+      merged.push(node);
+    }
+  }
+
+  return sortTreeNodes(merged);
+}
+
+function mergeApiWithGitChildren(apiChildren: TreeNode[], gitChildren: TreeNode[]): TreeNode[] {
+  const gitByPath = new Map(gitChildren.map((node) => [node.path, node]));
+  const apiByPath = new Map(apiChildren.map((node) => [node.path, node]));
+
+  const merged: TreeNode[] = [];
+
+  for (const apiNode of apiChildren) {
+    const gitNode = gitByPath.get(apiNode.path);
+    if (gitNode && gitNode.type === 'directory' && Array.isArray(gitNode.children)) {
+      // Directory exists in both — use API metadata but keep git-derived subtree
+      merged.push({
+        ...apiNode,
+        children: gitNode.children,
+      });
+    } else {
+      merged.push(apiNode);
+    }
+  }
+
+  for (const [path, gitNode] of gitByPath) {
+    if (!apiByPath.has(path)) {
+      merged.push(gitNode);
+    }
+  }
+
+  return sortTreeNodes(merged);
+}
+
+async function loadIgnoredRootNodes(directory: string): Promise<TreeNode[]> {
+  try {
+    const data = await opencodeApi.listFiles({ directory, path: '.' });
+    const list = Array.isArray(data) ? data : [];
+    const nodes = buildTreeNodes(list, directory, '.');
+    return nodes.filter((node) => node.ignored);
+  } catch {
+    return [];
+  }
+}
+
+function parseGitFileList(output: string): string[] {
+  return output
+    .replace(/\r/g, '')
+    .split('\0')
+    .map((token) => token.trim())
+    .filter(Boolean);
+}
+
+async function refreshGitFileSnapshot() {
+  const { activeDirectory } = getOptions();
+  const directory = activeDirectory.value.trim();
+  if (!directory) return;
+
+  const generation = ++gitFileListGeneration;
+  const { runOneShotPtyCommand } = usePtyOneshot();
+  try {
+    const output = await runOneShotPtyCommand('bash', [
+      '--noprofile',
+      '--norc',
+      '-c',
+      GIT_FILE_LIST_SCRIPT,
+    ]);
+    if (generation !== gitFileListGeneration) return;
+    if (activeDirectory.value.trim() !== directory) return;
+
+    const allPaths = parseGitFileList(output);
+    if (allPaths.length === 0) {
+      treeNodes.value = [];
+      files.value = [];
+      fileCacheVersion.value += 1;
+      return;
+    }
+
+    const gitTree = buildFullTreeFromPaths(allPaths);
+    const ignoredRoot = await loadIgnoredRootNodes(directory);
+    if (generation !== gitFileListGeneration) return;
+    if (activeDirectory.value.trim() !== directory) return;
+
+    const mergedRoot = ignoredRoot.length > 0 ? deepMergeGitTree(ignoredRoot, gitTree) : gitTree;
+    treeNodes.value = deepMergeGitTree(treeNodes.value, mergedRoot);
+
+    const sorted = Array.from(new Set(allPaths)).sort((a, b) => a.localeCompare(b));
+    if (
+      sorted.length !== files.value.length ||
+      sorted.some((path, index) => path !== files.value[index])
+    ) {
+      files.value = sorted;
+      fileCacheVersion.value += 1;
+    }
+  } catch {
+    if (generation !== gitFileListGeneration) return;
+    if (activeDirectory.value.trim() !== directory) return;
+  }
+}
+
 function setGitStatus(next: GitStatus | null) {
   gitStatus.value = next;
   if (!next) {
@@ -519,7 +727,7 @@ function setGitStatus(next: GitStatus | null) {
   gitStatusByPath.value = byPath;
 }
 
-async function refreshGitStatus() {
+async function refreshGitStatusOnly() {
   const { activeDirectory } = getOptions();
   const directory = activeDirectory.value.trim();
   if (!directory) {
@@ -548,6 +756,13 @@ async function refreshGitStatus() {
   } catch {
     if (generation !== gitStatusGeneration) return;
     setGitStatus(null);
+  }
+}
+
+async function refreshGitStatus() {
+  await refreshGitStatusOnly();
+  if (fileTreeStrategy.value === 'git') {
+    await refreshGitFileSnapshot();
   }
 }
 
@@ -678,6 +893,29 @@ function selectTreeFile(path: string) {
 const expandedTreePaths = computed(() => Array.from(expandedTreePathSet.value));
 
 async function loadSingleDirectory(path: string) {
+  if (fileTreeStrategy.value === 'git') {
+    if (path === '.') {
+      await refreshGitFileSnapshot();
+      return;
+    }
+    const options = getOptions();
+    const directory = options.activeDirectory.value.trim();
+    if (!directory) return;
+    try {
+      const data = await opencodeApi.listFiles({ directory, path });
+      if (options.activeDirectory.value.trim() !== directory) return;
+      const list = Array.isArray(data) ? data : [];
+      const apiChildren = buildTreeNodes(list, directory, path);
+      const parent = findTreeNodeByPath(treeNodes.value, path);
+      const gitChildren = parent?.children ?? [];
+      const merged = mergeApiWithGitChildren(apiChildren, gitChildren);
+      treeNodes.value = updateTreeNodeChildren(treeNodes.value, path, merged);
+    } catch {
+      return;
+    }
+    return;
+  }
+
   const options = getOptions();
   const directory = options.activeDirectory.value.trim();
   if (!directory) return;
@@ -712,7 +950,7 @@ function feed(packet: FileWatcherUpdatedPacket) {
   const relativePath = toRelativePath(packet.file, directory);
   if (relativePath === '.') return;
 
-  if (packet.event === 'unlink') {
+  if (fileTreeStrategy.value !== 'git' && packet.event === 'unlink') {
     const next = files.value.filter(
       (path) => path !== relativePath && !path.startsWith(`${relativePath}/`),
     );
@@ -739,6 +977,28 @@ async function rebuildFileCache() {
     files.value = [];
     fileCacheVersion.value += 1;
     treeLoading.value = false;
+    return;
+  }
+
+  const strategy = await detectFileTreeStrategy(directory);
+  if (buildId !== fileCacheBuildId) return;
+  if (options.activeDirectory.value.trim() !== directory) return;
+  fileTreeStrategy.value = strategy;
+
+  if (strategy === 'git') {
+    try {
+      await refreshGitFileSnapshot();
+      if (buildId !== fileCacheBuildId) return;
+      if (options.activeDirectory.value.trim() !== directory) return;
+    } catch (error) {
+      if (buildId !== fileCacheBuildId) return;
+      if (options.activeDirectory.value.trim() !== directory) return;
+      treeError.value = `Tree load failed: ${toErrorMessage(error)}`;
+    } finally {
+      if (buildId === fileCacheBuildId && options.activeDirectory.value.trim() === directory) {
+        treeLoading.value = false;
+      }
+    }
     return;
   }
 
@@ -806,17 +1066,20 @@ function initializeFileTree(options: UseFileTreeOptions) {
     (directory) => {
       clearScheduledDirectoryReloads();
       clearScheduledGitStatusReload();
+
+      treeNodes.value = [];
+      expandedTreePathSet.value = new Set();
+      selectedTreePath.value = '';
+      treeError.value = '';
+      files.value = [];
+      fileCacheVersion.value += 1;
+      fileTreeStrategy.value = 'filesystem';
+      setGitStatus(null);
+      branchEntries.value = [];
+
       const activePath = directory.trim();
       if (!activePath) {
-        treeNodes.value = [];
-        expandedTreePathSet.value = new Set();
-        selectedTreePath.value = '';
-        treeError.value = '';
         treeLoading.value = false;
-        files.value = [];
-        fileCacheVersion.value += 1;
-        setGitStatus(null);
-        branchEntries.value = [];
         return;
       }
       void reloadTree();
