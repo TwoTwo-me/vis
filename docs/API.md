@@ -10,11 +10,17 @@ OpenCode server REST API reference. Base URL: `http://localhost:4096` (default).
 | ---------------------- | ------------------------------- | --------------------------------------------------- |
 | `Content-Type`         | POST/PUT/PATCH/DELETE with body | `application/json`                                  |
 | `x-opencode-directory` | No                              | Scopes the request to a specific instance directory |
+| `x-opencode-workspace` | No                              | Scopes the request to a specific workspace          |
 | `Authorization`        | No                              | `Basic <base64(username:password)>`                 |
 
-### Instance Directory
+### Instance Scope
 
-Most endpoints accept an optional `query.directory` parameter (string). This scopes the request to a specific project directory. It can also be provided via the `x-opencode-directory` header.
+Most project-scoped endpoints accept optional scope parameters:
+
+- `query.directory?` (string) — Scope to a specific project directory. Can also be provided via `x-opencode-directory`.
+- `query.workspace?` (string) — Scope to a specific workspace ID. Can also be provided via `x-opencode-workspace`.
+
+Workspace IDs use the pattern `^wrk.*`.
 
 ### Error Responses
 
@@ -233,9 +239,45 @@ List tools with parameter schemas (requires a provider+model to resolve availabi
 
 - Query:
   - `directory?` (string)
+  - `workspace?` (string)
   - `provider` (string, **required**)
   - `model` (string, **required**)
 - Response `200`: [ToolListItem](#toollistitem)[]
+- Response `400`
+
+### POST /experimental/workspace
+
+Create a workspace for the current project.
+
+- Query:
+  - `directory?` (string)
+  - `workspace?` (string)
+- Body:
+  - `id?`: string (pattern `^wrk.*`)
+  - `type`: string (**required**)
+  - `branch`: string | null (**required**)
+  - `extra`: unknown | null (**required**)
+- Response `200`: [Workspace](#workspace)
+- Response `400`
+
+### GET /experimental/workspace
+
+List all workspaces for the current project.
+
+- Query:
+  - `directory?` (string)
+  - `workspace?` (string)
+- Response `200`: [Workspace](#workspace)[]
+
+### DELETE /experimental/workspace/{id}
+
+Remove an existing workspace.
+
+- Path: `id` (string, required — pattern `^wrk.*`)
+- Query:
+  - `directory?` (string)
+  - `workspace?` (string)
+- Response `200`: [Workspace](#workspace)
 - Response `400`
 
 ### POST /experimental/worktree
@@ -1333,6 +1375,16 @@ Discriminated union on `type`.
 - `name`: string
 - `branch`: string
 - `directory`: string
+
+### Workspace
+
+- `id`: string (pattern `^wrk.*`)
+- `type`: string
+- `branch`: string | null
+- `name`: string | null
+- `directory`: string | null
+- `extra`: unknown | null
+- `projectID`: string
 
 ### Path
 

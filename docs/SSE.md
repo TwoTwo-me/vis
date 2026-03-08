@@ -15,13 +15,13 @@ data: {"directory?":"string","payload":{"type":"string","properties":{...}}}
 
 ```
 
-- `directory` (string) — Workspace directory. Absent for `server.connected` and `server.heartbeat`. Set to `"global"` for `global.disposed`.
+- `directory` (string) — Scope key for the event source. Usually a project directory; for workspace-synced events this can be a workspace ID (`wrk...`). Absent for `server.connected` and `server.heartbeat`. Set to `"global"` for `global.disposed`.
 - `payload.type` (string) — Event name.
 - `payload.properties` (object) — Event-specific fields.
 
 ### `GET /event`
 
-Streams events for a single project instance selected by the `?directory=` query parameter or `X-OpenCode-Directory` header.
+Streams events for a single project/workspace scope selected by `?directory=` and optional `?workspace=` (or `X-OpenCode-Directory` / `X-OpenCode-Workspace` headers).
 
 Each SSE `data:` line contains a JSON object without the `directory`/`payload` wrapper:
 
@@ -177,6 +177,13 @@ Nested objects use inline notation: `time: { created: number }` means `{"time":{
 
 - `project.updated`
   - `properties: ProjectInfo`
+
+### Workspace
+
+- `workspace.ready`
+  - `name: string`
+- `workspace.failed`
+  - `message: string`
 
 ### Worktree
 
