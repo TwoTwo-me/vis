@@ -14,6 +14,7 @@
     </div>
     <div class="viewer-body">
       <ImageRenderer v-if="activeMode === 'image'" :src="effectiveImageSrc || ''" :alt="path" />
+      <PdfRenderer v-else-if="activeMode === 'pdf'" :src="effectivePdfSrc || ''" :title="path" />
       <MarkdownRenderer
         v-else-if="activeMode === 'rendered'"
         class="viewer-rendered-markdown"
@@ -45,8 +46,9 @@ import CodeRenderer from '../renderers/CodeRenderer.vue';
 import HexRenderer from '../renderers/HexRenderer.vue';
 import ImageRenderer from '../renderers/ImageRenderer.vue';
 import MarkdownRenderer from '../renderers/MarkdownRenderer.vue';
+import PdfRenderer from '../renderers/PdfRenderer.vue';
 
-type ModeId = 'rendered' | 'source' | 'image' | 'hex';
+type ModeId = 'rendered' | 'source' | 'image' | 'pdf' | 'hex';
 
 const props = defineProps<{
   path?: string;
@@ -58,6 +60,7 @@ const props = defineProps<{
   theme?: string;
   lines?: string;
   imageSrc?: string;
+  pdfSrc?: string;
 }>();
 
 const emit = defineEmits<{
@@ -135,6 +138,8 @@ const effectiveImageSrc = computed(() => {
   return `data:${mimeTypeFromExt(pathExt.value)};base64,${contentBase64}`;
 });
 
+const effectivePdfSrc = computed(() => props.pdfSrc);
+
 const effectiveRawHtml = computed(() => {
   if (props.rawHtml) return props.rawHtml;
   if (!isBitmapImage.value) return undefined;
@@ -146,6 +151,7 @@ const effectiveRawHtml = computed(() => {
 const availableModes = computed<Array<{ id: ModeId; label: string }>>(() => {
   const modes: Array<{ id: ModeId; label: string }> = [];
   if (effectiveImageSrc.value) modes.push({ id: 'image', label: 'Image' });
+  if (effectivePdfSrc.value) modes.push({ id: 'pdf', label: 'PDF' });
   if (isMarkdown.value && effectiveFileContent.value != null) {
     modes.push({ id: 'rendered', label: 'Rendered' });
     modes.push({ id: 'source', label: 'Source' });
@@ -159,6 +165,7 @@ const availableModes = computed<Array<{ id: ModeId; label: string }>>(() => {
 
 const preferredDefaultMode = computed<ModeId>(() => {
   if (canShowAsImage.value) return 'image';
+  if (effectivePdfSrc.value) return 'pdf';
   if (isMarkdown.value) return 'rendered';
   return 'source';
 });
