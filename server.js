@@ -4,7 +4,8 @@ import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
 import { request as requestHTTP } from 'node:http';
 import { request as requestHTTPS } from 'node:https';
-import { join } from 'node:path';
+import { readFile, realpath } from 'node:fs/promises';
+import { extname, join, relative, resolve } from 'node:path';
 
 const app = new Hono();
 const hopByHopHeaders = new Set([
@@ -66,6 +67,129 @@ const managedBootstrap = Object.freeze({
     pty: true,
   },
 });
+
+const BINARY_MIME_TYPES = Object.freeze({
+  '.bmp': 'image/bmp',
+  '.gif': 'image/gif',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.png': 'image/png',
+  '.webp': 'image/webp',
+  '.pdf': 'application/pdf',
+  '.svg': 'image/svg+xml',
+  '.txt': 'text/plain',
+  '.md': 'text/markdown',
+  '.html': 'text/html',
+  '.json': 'application/json',
+});
+
+function resolveMimeType(filePath) {
+  const extension = extname(filePath).toLowerCase();
+  return BINARY_MIME_TYPES[extension] || 'application/octet-stream';
+}
+
+function isPdfPath(pathname) {
+  return pathname.toLowerCase().endsWith('.pdf');
+}
+
+function isWithinPath(basePath, targetPath) {
+  const rel = relative(basePath, targetPath);
+  return rel === '' || (!rel.startsWith('..') && rel !== '' && !rel.startsWith('/'));
+}
+
+function collectProjectRoots(payload) {
+  if (!Array.isArray(payload)) return [];
+  const roots = new Set();
+  for (const item of payload) {
+    if (!item || typeof item !== 'object') continue;
+    const record = item;
+    if (typeof record.worktree === 'string' && record.worktree.trim()) {
+      roots.add(resolve(record.worktree.trim()));
+    }
+    if (Array.isArray(record.sandboxes)) {
+      for (const sandbox of record.sandboxes) {
+        if (typeof sandbox === 'string' && sandbox.trim()) {
+          roots.add(resolve(sandbox.trim()));
+        }
+      }
+    }
+  }
+  return Array.from(roots);
+}
+
+async function fetchManagedProjectRoots(c, managedConfig) {
+  const upstreamURL = buildManagedUpstreamURL(managedConfig.upstreamURL, '/project', '');
+  const response = await fetch(upstreamURL, {
+    method: 'GET',
+    headers: createManagedUpstreamRequestHeaders(c.req.raw.headers, managedConfig),
+    redirect: 'manual',
+  });
+  if (!response.ok) {
+    throw new Error('Project root lookup failed');
+  }
+  const data = await response.json();
+  return collectProjectRoots(data);
+}
+
+async function resolveManagedPdfTarget(c, managedConfig) {
+  const directory = c.req.query('directory') ?? '';
+  const path = c.req.query('path') ?? '';
+  if (!isPdfPath(path)) {
+    return { error: new Response(JSON.stringify({ error: 'Not found' }), { status: 404, headers: { 'Content-Type': 'application/json' } }) };
+  }
+
+  const normalizedDirectory = directory.trim() ? resolve(directory.trim()) : '';
+  const normalizedTarget = path.trim() ? path.trim() : '';
+  if (!normalizedDirectory || !normalizedTarget) {
+    return { error: new Response(JSON.stringify({ error: 'Invalid path' }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+  }
+
+  const allowedRoots = await fetchManagedProjectRoots(c, managedConfig);
+  if (allowedRoots.length === 0) {
+    return { error: new Response(JSON.stringify({ error: 'Invalid path' }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+  }
+
+  const resolvedDirectory = await realpath(normalizedDirectory).catch(() => null);
+  if (!resolvedDirectory) {
+    return { error: new Response(JSON.stringify({ error: 'Invalid path' }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+  }
+
+  const matchedRoot = allowedRoots.find((root) => isWithinPath(root, resolvedDirectory));
+  if (!matchedRoot) {
+    return { error: new Response(JSON.stringify({ error: 'Invalid path' }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+  }
+
+  const absoluteTarget = normalizedTarget.startsWith('/')
+    ? resolve(normalizedTarget)
+    : resolve(resolvedDirectory, normalizedTarget);
+  const resolvedTarget = await realpath(absoluteTarget).catch(() => null);
+  if (!resolvedTarget) {
+    return { error: new Response(JSON.stringify({ error: 'File read failed' }), { status: 404, headers: { 'Content-Type': 'application/json' } }) };
+  }
+  if (!isWithinPath(resolvedDirectory, resolvedTarget) || !isWithinPath(matchedRoot, resolvedTarget)) {
+    return { error: new Response(JSON.stringify({ error: 'Invalid path' }), { status: 400, headers: { 'Content-Type': 'application/json' } }) };
+  }
+
+  return { target: resolvedTarget };
+}
+
+async function serveLocalPdfFile(c, managedConfig) {
+  const resolved = await resolveManagedPdfTarget(c, managedConfig);
+  if (resolved.error) return resolved.error;
+
+  try {
+    const file = await readFile(resolved.target);
+    return new Response(file, {
+      status: 200,
+      headers: {
+        'Content-Type': resolveMimeType(resolved.target),
+        'Content-Length': String(file.byteLength),
+      },
+    });
+  } catch {
+    return c.json({ error: 'File read failed' }, 404);
+  }
+}
 
 function readManagedConfig(env) {
   if (env.VIS_MODE !== 'managed') return null;
@@ -409,6 +533,7 @@ const managedConfig = readManagedConfig(process.env);
 if (managedConfig) {
   app.get('/api/bootstrap', (c) => c.json(managedBootstrap));
   app.get('/api/global/event', (c) => relayManagedSseRequest(c, managedConfig));
+  app.get('/api/file/content/pdf', (c) => serveLocalPdfFile(c, managedConfig));
   for (const route of managedRestRoutes) {
     app.all(`/api${route}`, (c) => relayManagedRestRequest(c, managedConfig));
   }

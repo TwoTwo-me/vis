@@ -1,6 +1,9 @@
 import assert from 'node:assert/strict';
+import { mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import {
   connectWebSocketOnce,
@@ -61,6 +64,47 @@ async function getUnusedOrigin() {
   });
 
   return `http://127.0.0.1:${address.port}`;
+}
+
+async function startProjectRootStub(projectRoot) {
+  const server = createServer((req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+
+    if (url.pathname === '/project') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        JSON.stringify([
+          {
+            id: 'proj-1',
+            worktree: projectRoot,
+            sandboxes: [],
+            time: { created: 1, updated: 1 },
+          },
+        ]),
+      );
+      return;
+    }
+
+    res.writeHead(404, { 'content-type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Not found' }));
+  });
+
+  server.listen(0, '127.0.0.1');
+  await once(server, 'listening');
+  const address = server.address();
+  assert(address && typeof address === 'object', 'expected project root stub address');
+
+  return {
+    origin: `http://127.0.0.1:${address.port}`,
+    async stop() {
+      await new Promise((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error) rejectClose(error);
+          else resolveClose();
+        });
+      });
+    },
+  };
 }
 
 before(async () => {
@@ -187,6 +231,73 @@ test('GET /api/global/event returns 502 when the upstream SSE endpoint is unavai
     assert.deepEqual(await response.json(), { error: 'Upstream request failed' });
   } finally {
     await unavailableVis.stop();
+  }
+});
+
+
+test('GET /api/file/content/pdf serves local PDFs under known project roots', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-file-content-pdf-'));
+  const upstreamStub = await startProjectRootStub(workspace);
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstreamStub.origin,
+    VIS_EDGE_AUTH_MODE: 'edge',
+  });
+  const pdfPath = join(workspace, 'fixture.pdf');
+  const expected = Buffer.from('%PDF-1.4\n%test');
+  await writeFile(pdfPath, expected);
+
+  try {
+    const response = await fetch(
+      `${localVis.origin}/api/file/content/pdf?directory=${encodeURIComponent(workspace)}&path=fixture.pdf`,
+    );
+
+    assert.equal(response.status, 200, 'expected local PDF endpoint to return binary PDF');
+    assert.equal(response.headers.get('content-type'), 'application/pdf');
+    assert.equal(response.headers.get('content-length'), String(expected.length));
+    assert.equal(await response.arrayBuffer().then((buffer) => Buffer.from(buffer).compare(expected)), 0);
+  } finally {
+    await Promise.allSettled([localVis.stop(), upstreamStub.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('GET /api/file/content/pdf rejects unknown roots and invalid paths', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-file-content-pdf-error-'));
+  const outsideRoot = await mkdtemp(join(tmpdir(), 'vis-file-content-pdf-outside-'));
+  const upstreamStub = await startProjectRootStub(workspace);
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstreamStub.origin,
+    VIS_EDGE_AUTH_MODE: 'edge',
+  });
+  await writeFile(join(workspace, 'fixture.pdf'), Buffer.from('%PDF-1.4\n%inside'));
+  await writeFile(join(outsideRoot, 'secret.pdf'), Buffer.from('%PDF-1.4\n%outside'));
+
+  try {
+    const missing = await fetch(
+      `${localVis.origin}/api/file/content/pdf?directory=${encodeURIComponent(workspace)}&path=missing.pdf`,
+    );
+    assert.equal(missing.status, 404);
+    assert.deepEqual(await missing.json(), { error: 'File read failed' });
+
+    const invalidTraversal = await fetch(
+      `${localVis.origin}/api/file/content/pdf?directory=${encodeURIComponent(workspace)}&path=${encodeURIComponent(join(outsideRoot, 'secret.pdf'))}`,
+    );
+    assert.equal(invalidTraversal.status, 400);
+    assert.deepEqual(await invalidTraversal.json(), { error: 'Invalid path' });
+
+    const invalidRoot = await fetch(
+      `${localVis.origin}/api/file/content/pdf?directory=${encodeURIComponent('/')}&path=${encodeURIComponent(join(outsideRoot, 'secret.pdf'))}`,
+    );
+    assert.equal(invalidRoot.status, 400);
+    assert.deepEqual(await invalidRoot.json(), { error: 'Invalid path' });
+  } finally {
+    await Promise.allSettled([
+      localVis.stop(),
+      upstreamStub.stop(),
+      rm(workspace, { recursive: true, force: true }),
+      rm(outsideRoot, { recursive: true, force: true }),
+    ]);
   }
 });
 
