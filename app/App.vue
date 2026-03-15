@@ -479,7 +479,17 @@ function buildWorktreeSnapshotScript(mode: WorktreeSnapshotMode): string {
 }
 const REASONING_CLOSE_DELAY_MS = 3000;
 const SUBAGENT_CLOSE_DELAY_MS = 3000;
-const ATTACHMENT_MIME_ALLOWLIST = new Set(['image/png', 'image/jpeg', 'image/gif', 'image/webp']);
+const ATTACHMENT_MIME_ALLOWLIST = new Set([
+  'image/png',
+  'image/jpeg',
+  'image/gif',
+  'image/webp',
+  'application/pdf',
+]);
+
+function isAllowedAttachmentMime(mime: string) {
+  return ATTACHMENT_MIME_ALLOWLIST.has(mime);
+}
 
 type TodoPanelSession = {
   sessionId: string;
@@ -1555,6 +1565,7 @@ function normalizeStoredAttachment(value: unknown): Attachment | null {
   const mime = typeof record.mime === 'string' ? record.mime.trim() : '';
   const dataUrl = typeof record.dataUrl === 'string' ? record.dataUrl : '';
   if (!id || !filename || !mime || !dataUrl) return null;
+  if (!isAllowedAttachmentMime(mime)) return null;
   return { id, filename, mime, dataUrl };
 }
 
@@ -1874,13 +1885,15 @@ function buildComposerDraftFromUserMessage(payload: {
   const message = msg.get(payload.messageId);
   const messageInput = (message ? msg.getTextContent(payload.messageId) : '') || '';
   const sourceAttachments =
-    (message ? msg.getImageAttachments(payload.messageId) : undefined) ?? [];
-  const attachmentsForDraft: Attachment[] = sourceAttachments.map((item) => ({
-    id: item.id,
-    filename: item.filename,
-    mime: item.mime,
-    dataUrl: item.url,
-  }));
+    (message ? msg.getAttachments(payload.messageId) : undefined) ?? [];
+  const attachmentsForDraft: Attachment[] = sourceAttachments
+    .filter((item) => isAllowedAttachmentMime(item.mime))
+    .map((item) => ({
+      id: item.id,
+      filename: item.filename,
+      mime: item.mime,
+      dataUrl: item.url,
+    }));
   const meta = userMessageMetaById.value[payload.messageId];
   return {
     messageInput,
@@ -2064,7 +2077,7 @@ function readFileAsDataUrl(file: File) {
 }
 
 async function handleAddAttachments(files: File[]) {
-  const accepted = files.filter((file) => ATTACHMENT_MIME_ALLOWLIST.has(file.type));
+  const accepted = files.filter((file) => isAllowedAttachmentMime(file.type));
   if (accepted.length === 0) {
     sendStatus.value = 'Unsupported attachment type.';
     return;
@@ -2375,11 +2388,10 @@ async function deleteSession(sessionId: string) {
   sessionError.value = '';
   if (!sessionId) return;
   try {
-    const directory = activeDirectory.value.trim();
     await openCodeApi.deleteSession({
       sessionId,
       projectId: selectedProjectId.value,
-      directory: directory || undefined,
+      directory: activeDirectory.value || undefined,
     });
   } catch (error) {
     sessionError.value = `Session delete failed: ${toErrorMessage(error)}`;
@@ -4959,9 +4971,10 @@ function handleShowThreadHistory(payload: { entries: ThreadHistoryEntry[] }) {
   });
 }
 
-function handleOpenImage(payload: { url: string; filename: string }) {
-  const { url, filename } = payload;
-  const key = `image-viewer:${url}`;
+function handleOpenImage(payload: { url: string; filename: string; mime: string }) {
+  const { url, filename, mime } = payload;
+  const viewerType = mime === 'application/pdf' ? 'pdf' : 'image';
+  const key = `${viewerType}-viewer:${url}`;
   if (fw.has(key)) {
     fw.bringToFront(key);
     return;
@@ -4971,13 +4984,14 @@ function handleOpenImage(payload: { url: string; filename: string }) {
     component: ContentViewer,
     props: {
       path: filename,
-      imageSrc: url,
+      imageSrc: mime.startsWith('image/') ? url : undefined,
+      pdfSrc: mime === 'application/pdf' ? url : undefined,
     },
     closable: true,
     resizable: true,
     focusOnOpen: true,
     scroll: 'manual',
-    title: filename || 'Image',
+    title: filename || (mime === 'application/pdf' ? 'PDF' : 'Image'),
     x: pos.x,
     y: pos.y,
     width: 800,
@@ -4987,7 +5001,6 @@ function handleOpenImage(payload: { url: string; filename: string }) {
 }
 
 async function handleEditMessage(payload: { sessionId: string; part: MessagePart }) {
-  const directory = activeDirectory.value.trim();
   if (payload.part.type !== 'text') return;
   const nextText = window.prompt('Edit message', payload.part.text);
   if (nextText === null) return;
@@ -5001,7 +5014,7 @@ async function handleEditMessage(payload: { sessionId: string; part: MessagePart
       messageID: part.messageID,
       partID: part.id,
       part,
-      directory: directory || undefined,
+      directory: activeDirectory.value || undefined,
     });
   } catch (error) {
     console.error('Failed to update message part', error);
@@ -5017,6 +5030,15 @@ function toFileViewerTitle(path: string, lines?: string) {
   const base = resolveWorktreeRelativePath(path) || path;
   if (!lines) return base;
   return `${base}:${lines}`;
+}
+
+function isPdfPath(path: string) {
+  return path.toLowerCase().endsWith('.pdf');
+}
+
+function buildPdfFileViewerSrc(directory: string, path: string) {
+  const params = new URLSearchParams({ directory, path });
+  return `/api/file/content/pdf?${params.toString()}`;
 }
 
 async function openFileViewer(path: string, lines?: string) {
@@ -5073,6 +5095,19 @@ async function openFileViewer(path: string, lines?: string) {
     const isBase64Payload = encoding === 'base64';
     if (type === 'binary' || isBase64Payload) {
       if (!content) {
+        if (isPdfPath(path)) {
+          fw.updateOptions(key, {
+            props: {
+              path,
+              pdfSrc: buildPdfFileViewerSrc(requestPath.directory, requestPath.path),
+              lines,
+              gutterMode: 'none',
+              theme: shikiTheme.value,
+            },
+          });
+          return;
+        }
+
         fw.updateOptions(key, {
           props: {
             path,
@@ -5085,10 +5120,14 @@ async function openFileViewer(path: string, lines?: string) {
         });
         return;
       }
+
       fw.updateOptions(key, {
         props: {
           path,
           binaryBase64: content,
+          pdfSrc: isPdfPath(path)
+            ? `data:application/pdf;base64,${content}`
+            : undefined,
           lang: guessLanguage(path),
           lines,
           gutterMode: 'default',

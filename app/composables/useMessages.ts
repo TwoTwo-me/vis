@@ -283,13 +283,12 @@ function getTextContent(id: string): string {
   return chunks.join('');
 }
 
-function getImageAttachments(id: string): MessageAttachment[] | undefined {
+function getAttachments(id: string): MessageAttachment[] | undefined {
   const files = getPartsByType(id, 'file');
   if (files.length === 0) return undefined;
   const result: MessageAttachment[] = [];
   let index = 0;
   for (const part of files) {
-    if (!part.mime.startsWith('image/')) continue;
     result.push({
       id: part.id,
       url: part.url,
@@ -299,6 +298,13 @@ function getImageAttachments(id: string): MessageAttachment[] | undefined {
     index += 1;
   }
   return result.length > 0 ? result : undefined;
+}
+
+function getImageAttachments(id: string): MessageAttachment[] | undefined {
+  const attachments = getAttachments(id);
+  if (!attachments) return undefined;
+  const images = attachments.filter((part) => part.mime.startsWith('image/'));
+  return images.length > 0 ? images : undefined;
 }
 
 function getUsage(id: string): MessageUsage | undefined {
@@ -378,7 +384,11 @@ function getThread(rootId: string): MessageInfo[] {
 function getFinalAnswer(rootId: string): MessageInfo | undefined {
   const thread = getThread(rootId);
   const assistants = thread
-    .filter((message) => message.role === 'assistant' && hasTextContent(message.id))
+    .filter(
+      (message) =>
+        message.role === 'assistant' &&
+        (hasTextContent(message.id) || (getAttachments(message.id)?.length ?? 0) > 0),
+    )
     .sort(byTimeThenId);
   return assistants[assistants.length - 1];
 }
@@ -446,6 +456,7 @@ export function useMessages() {
     getPartsByType,
     hasTextContent,
     getTextContent,
+    getAttachments,
     getImageAttachments,
     getUsage,
     getStatus,

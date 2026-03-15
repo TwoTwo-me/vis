@@ -35,15 +35,24 @@
             @rendered="emit('message-rendered', getThreadUserRenderKey(root))"
           />
           <div v-if="getMessageAttachments(root).length > 0" class="output-entry-attachments">
-            <img
-              v-for="item in getMessageAttachments(root)"
-              :key="item.id"
-              class="output-entry-attachment clickable"
-              :src="item.url"
-              :alt="item.filename"
-              loading="lazy"
-              @click="emit('open-image', { url: item.url, filename: item.filename })"
-            />
+            <template v-for="item in getMessageAttachments(root)" :key="item.id">
+              <img
+                v-if="item.mime.startsWith('image/')"
+                class="output-entry-attachment clickable"
+                :src="item.url"
+                :alt="item.filename"
+                loading="lazy"
+                @click="emit('open-image', { url: item.url, filename: item.filename, mime: item.mime })"
+              />
+              <button
+                v-else-if="item.mime === 'application/pdf'"
+                type="button"
+                class="output-entry-attachment-button"
+                @click="emit('open-image', { url: item.url, filename: item.filename, mime: item.mime })"
+              >
+                {{ item.filename }}
+              </button>
+            </template>
           </div>
         </div>
       </div>
@@ -69,15 +78,24 @@
             v-if="getMessageAttachments(getFinalAnswer(root)).length > 0"
             class="output-entry-attachments"
           >
-            <img
-              v-for="item in getMessageAttachments(getFinalAnswer(root))"
-              :key="item.id"
-              class="output-entry-attachment clickable"
-              :src="item.url"
-              :alt="item.filename"
-              loading="lazy"
-              @click="emit('open-image', { url: item.url, filename: item.filename })"
-            />
+            <template v-for="item in getMessageAttachments(getFinalAnswer(root))" :key="item.id">
+              <img
+                v-if="item.mime.startsWith('image/')"
+                class="output-entry-attachment clickable"
+                :src="item.url"
+                :alt="item.filename"
+                loading="lazy"
+                @click="emit('open-image', { url: item.url, filename: item.filename, mime: item.mime })"
+              />
+              <button
+                v-else-if="item.mime === 'application/pdf'"
+                type="button"
+                class="output-entry-attachment-button"
+                @click="emit('open-image', { url: item.url, filename: item.filename, mime: item.mime })"
+              >
+                {{ item.filename }}
+              </button>
+            </template>
           </div>
           <button
             v-if="showHistoryButton(root)"
@@ -159,7 +177,7 @@ const emit = defineEmits<{
   (event: 'revert-message', payload: { sessionId: string; messageId: string }): void;
   (event: 'undo-revert'): void;
   (event: 'show-message-diff', payload: { messageKey: string; diffs: MessageDiffEntry[] }): void;
-  (event: 'open-image', payload: { url: string; filename: string }): void;
+  (event: 'open-image', payload: { url: string; filename: string; mime: string }): void;
   (event: 'show-thread-history', payload: { entries: HistoryWindowEntry[] }): void;
   (event: 'message-rendered', renderKey: string): void;
 }>();
@@ -194,7 +212,7 @@ function getMessageContent(message?: MessageInfo): string {
 
 function getMessageAttachments(message?: MessageInfo): MessageAttachment[] {
   if (!message) return [];
-  return msg.getImageAttachments(message.id) ?? [];
+  return msg.getAttachments(message.id) ?? [];
 }
 
 function getMessageError(message?: MessageInfo): { name: string; message: string } | null {
@@ -223,7 +241,9 @@ function getMessageTime(message?: MessageInfo): number | undefined {
 }
 
 function getAssistantMessages(root: MessageInfo): MessageInfo[] {
-  return getThread(root.id).filter((item) => item.role === 'assistant' && hasTextContent(item));
+  return getThread(root.id).filter(
+    (item) => item.role === 'assistant' && (hasTextContent(item) || getMessageAttachments(item).length > 0),
+  );
 }
 
 function hasAssistantMessages(root: MessageInfo): boolean {
@@ -667,5 +687,20 @@ function getThreadUserRenderKey(root: MessageInfo): string {
 
 .output-entry-attachment.clickable {
   cursor: pointer;
+}
+
+.output-entry-attachment-button {
+  width: 100%;
+  min-height: 72px;
+  border-radius: 8px;
+  border: 1px solid #334155;
+  background: #1e293b;
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 12px;
+  padding: 10px;
+  text-align: left;
+  cursor: pointer;
+  word-break: break-word;
 }
 </style>

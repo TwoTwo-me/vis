@@ -121,8 +121,16 @@
             class="attachment-thumb clickable"
             :src="item.dataUrl"
             :alt="item.filename"
-            @click="$emit('open-image', { url: item.dataUrl, filename: item.filename })"
+            @click="$emit('open-image', { url: item.dataUrl, filename: item.filename, mime: item.mime })"
           />
+          <button
+            v-else-if="item.mime === 'application/pdf'"
+            type="button"
+            class="attachment-preview-button"
+            @click="$emit('open-image', { url: item.dataUrl, filename: item.filename, mime: item.mime })"
+          >
+            PDF
+          </button>
           <div class="attachment-meta">
             <div class="attachment-name">{{ item.filename }}</div>
             <div class="attachment-type">{{ item.mime }}</div>
@@ -422,7 +430,7 @@ const emit = defineEmits<{
   (event: 'abort'): void;
   (event: 'add-attachments', files: File[]): void;
   (event: 'remove-attachment', id: string): void;
-  (event: 'open-image', payload: { url: string; filename: string }): void;
+  (event: 'open-image', payload: { url: string; filename: string; mime: string }): void;
 }>();
 
 const messageValue = computed({
@@ -434,7 +442,7 @@ const textareaRef = ref<HTMLTextAreaElement | null>(null);
 const fileInputRef = ref<HTMLInputElement | null>(null);
 const modelDropdownRef = ref<HTMLElement | null>(null);
 const modelSearchQuery = ref('');
-const acceptMime = 'image/png,image/jpeg,image/gif,image/webp';
+const acceptMime = 'image/png,image/jpeg,image/gif,image/webp,application/pdf';
 
 const { enterToSend, suppressAutoWindows } = useSettings();
 
@@ -1319,6 +1327,19 @@ const inputMessageStyle = computed(() => {
 
 .attachment-thumb.clickable {
   cursor: pointer;
+}
+
+.attachment-preview-button {
+  width: 36px;
+  height: 36px;
+  border-radius: 6px;
+  border: 1px solid #334155;
+  background: #1e293b;
+  color: #e2e8f0;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
+  flex: 0 0 auto;
 }
 
 .attachment-meta {

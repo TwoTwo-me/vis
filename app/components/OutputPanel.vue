@@ -123,7 +123,7 @@ const emit = defineEmits<{
   (event: 'revert-message', payload: { sessionId: string; messageId: string }): void;
   (event: 'undo-revert'): void;
   (event: 'show-message-diff', payload: { messageKey: string; diffs: MessageDiffEntry[] }): void;
-  (event: 'open-image', payload: { url: string; filename: string }): void;
+  (event: 'open-image', payload: { url: string; filename: string; mime: string }): void;
   (event: 'show-thread-history', payload: { entries: HistoryWindowEntry[] }): void;
   (event: 'open-file', path: string, lines?: string): void;
   (event: 'show-commit', hash: string): void;
