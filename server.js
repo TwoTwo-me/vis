@@ -1,42 +1,439 @@
 #!/usr/bin/env node
+import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
-import { serve } from '@hono/node-server';
 import { Hono } from 'hono';
+import { request as requestHTTP } from 'node:http';
+import { request as requestHTTPS } from 'node:https';
 import { join } from 'node:path';
-import { proxy } from 'hono/proxy';
 
 const app = new Hono();
+const hopByHopHeaders = new Set([
+  'connection',
+  'content-length',
+  'host',
+  'keep-alive',
+  'proxy-authenticate',
+  'proxy-authorization',
+  'te',
+  'trailer',
+  'transfer-encoding',
+  'upgrade',
+]);
+const managedDeniedResponse = Object.freeze({
+  error: 'Not found',
+});
+const managedRestRoutes = [
+  '/path',
+  '/file/content',
+  '/file',
+  '/project/current',
+  '/project/:projectID',
+  '/project',
+  '/session/status',
+  '/session/:sessionID/diff',
+  '/session/:sessionID/children',
+  '/session/:sessionID/message/:messageID/part/:partID',
+  '/session/:sessionID/message/:messageID',
+  '/session/:sessionID/message',
+  '/session/:sessionID/todo',
+  '/session/:sessionID/fork',
+  '/session/:sessionID/revert',
+  '/session/:sessionID/unrevert',
+  '/session/:sessionID/command',
+  '/session/:sessionID/prompt_async',
+  '/session/:sessionID/abort',
+  '/session/:sessionID',
+  '/session',
+  '/agent',
+  '/command',
+  '/permission/:permissionID/reply',
+  '/permission',
+  '/question/:questionID/reply',
+  '/question/:questionID/reject',
+  '/question',
+  '/pty/:ptyID',
+  '/pty',
+  '/vcs',
+  '/experimental/worktree',
+  '/config/providers',
+];
+const managedBootstrap = Object.freeze({
+  mode: 'managed',
+  auth: 'edge',
+  capabilities: {
+    rest: true,
+    sse: true,
+    pty: true,
+  },
+});
 
-if (process.argv[2] === 'proxy') {
-  const baseURL = process.argv[3] ?? 'https://xenodrive.github.io/vis';
+function readManagedConfig(env) {
+  if (env.VIS_MODE !== 'managed') return null;
 
-  console.log('Proxy to ' + baseURL);
+  const upstreamURLValue = env.VIS_UPSTREAM_URL?.trim();
+  if (!upstreamURLValue) {
+    throw new Error('VIS_UPSTREAM_URL is required when VIS_MODE=managed');
+  }
 
-  app.use('*', (c) => {
-    const url = new URL(baseURL);
-    url.pathname = url.pathname.replace(/\/$/, '') + c.req.path;
+  let upstreamURL;
+  try {
+    upstreamURL = new URL(upstreamURLValue);
+  } catch {
+    throw new Error('VIS_UPSTREAM_URL must be a valid URL when VIS_MODE=managed');
+  }
 
-    const q = c.req.queries();
-    for (const k in q) {
-      for (const v of q?.[k] ?? []) {
-        url.searchParams.append(k, v);
-      }
+  const edgeAuthMode = env.VIS_EDGE_AUTH_MODE?.trim();
+  if (!edgeAuthMode) {
+    throw new Error('VIS_EDGE_AUTH_MODE is required when VIS_MODE=managed');
+  }
+  if (edgeAuthMode !== 'edge') {
+    throw new Error('VIS_EDGE_AUTH_MODE must be edge when VIS_MODE=managed');
+  }
+
+  return Object.freeze({
+    mode: 'managed',
+    upstreamURL: upstreamURL.toString(),
+    upstreamAuthHeader: env.VIS_UPSTREAM_AUTH_HEADER?.trim() || null,
+    edgeAuthMode,
+  });
+}
+
+function buildManagedUpstreamURL(baseURL, pathname, search) {
+  const upstreamURL = new URL(baseURL);
+  upstreamURL.pathname = `${upstreamURL.pathname.replace(/\/$/, '')}${pathname}`;
+  upstreamURL.search = search;
+  return upstreamURL;
+}
+
+function createManagedUpstreamRequestHeaders(headers, managedConfig) {
+  const upstreamHeaders = new Headers(headers);
+
+  for (const header of hopByHopHeaders) {
+    upstreamHeaders.delete(header);
+  }
+
+  upstreamHeaders.delete('authorization');
+  upstreamHeaders.delete('cookie');
+
+  if (managedConfig.upstreamAuthHeader) {
+    upstreamHeaders.set('authorization', managedConfig.upstreamAuthHeader);
+  }
+
+  return upstreamHeaders;
+}
+
+function createManagedUpstreamWebSocketHeaders(headers, managedConfig) {
+  const upstreamHeaders = new Headers(headers);
+
+  upstreamHeaders.delete('connection');
+  upstreamHeaders.delete('host');
+  upstreamHeaders.delete('origin');
+  upstreamHeaders.delete('cookie');
+  upstreamHeaders.delete('authorization');
+  upstreamHeaders.delete('x-forwarded-for');
+  upstreamHeaders.delete('x-forwarded-host');
+  upstreamHeaders.delete('x-forwarded-proto');
+  upstreamHeaders.delete('x-real-ip');
+
+  upstreamHeaders.set('connection', 'Upgrade');
+  upstreamHeaders.set('upgrade', 'websocket');
+
+  if (managedConfig.upstreamAuthHeader) {
+    upstreamHeaders.set('authorization', managedConfig.upstreamAuthHeader);
+  }
+
+  return upstreamHeaders;
+}
+
+function createRelayResponseHeaders(headers) {
+  const responseHeaders = new Headers(headers);
+
+  for (const header of hopByHopHeaders) {
+    responseHeaders.delete(header);
+  }
+
+  return responseHeaders;
+}
+
+async function relayManagedRestRequest(c, managedConfig) {
+  const requestURL = new URL(c.req.url);
+  const managedPath = c.req.path.slice('/api'.length);
+  const upstreamURL = buildManagedUpstreamURL(
+    managedConfig.upstreamURL,
+    managedPath,
+    requestURL.search,
+  );
+  const init = {
+    method: c.req.method,
+    headers: createManagedUpstreamRequestHeaders(c.req.raw.headers, managedConfig),
+    redirect: 'manual',
+  };
+
+  if (c.req.method !== 'GET' && c.req.method !== 'HEAD') {
+    const body = await c.req.raw.arrayBuffer();
+    if (body.byteLength > 0) {
+      init.body = body;
     }
+  }
 
-    return proxy(url, {
-      ...c.req,
+  try {
+    const response = await fetch(upstreamURL, init);
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: createRelayResponseHeaders(response.headers),
+    });
+  } catch {
+    return c.json({ error: 'Upstream request failed' }, 502);
+  }
+}
+
+async function relayManagedSseRequest(c, managedConfig) {
+  const requestURL = new URL(c.req.url);
+  const upstreamURL = buildManagedUpstreamURL(
+    managedConfig.upstreamURL,
+    '/global/event',
+    requestURL.search,
+  );
+
+  try {
+    const response = await fetch(upstreamURL, {
+      method: 'GET',
+      headers: createManagedUpstreamRequestHeaders(c.req.raw.headers, managedConfig),
+      redirect: 'manual',
+    });
+
+    return new Response(response.body, {
+      status: response.status,
+      statusText: response.statusText,
+      headers: createRelayResponseHeaders(response.headers),
+    });
+  } catch {
+    return c.json({ error: 'Upstream request failed' }, 502);
+  }
+}
+
+function toNodeRequestHeaders(headers) {
+  const requestHeaders = {};
+
+  headers.forEach((value, key) => {
+    requestHeaders[key] = value;
+  });
+
+  return requestHeaders;
+}
+
+function isManagedPtyUpgradeRequest(req) {
+  if (!req.url) return false;
+  const pathname = new URL(req.url, `http://${req.headers.host ?? '127.0.0.1'}`).pathname;
+  return /^\/api\/pty\/[^/]+\/connect$/.test(pathname);
+}
+
+function writeRawSocketResponse(socket, statusCode, statusMessage, rawHeaders, body) {
+  const headerLines = [];
+
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index];
+    const value = rawHeaders[index + 1] ?? '';
+    if (!name) continue;
+    if (hopByHopHeaders.has(name.toLowerCase()) && name.toLowerCase() !== 'upgrade') {
+      continue;
+    }
+    headerLines.push(`${name}: ${value}`);
+  }
+
+  socket.write(
+    [
+      `HTTP/1.1 ${statusCode} ${statusMessage}`,
+      ...headerLines,
+      body ? `Content-Length: ${body.length}` : 'Content-Length: 0',
+      '',
+      '',
+    ].join('\r\n'),
+  );
+
+  if (body && body.length > 0) {
+    socket.write(body);
+  }
+
+  socket.end();
+}
+
+function writeSocketJsonError(socket, statusCode, statusMessage, payload) {
+  const body = Buffer.from(JSON.stringify(payload));
+  socket.write(
+    [
+      `HTTP/1.1 ${statusCode} ${statusMessage}`,
+      'Content-Type: application/json',
+      `Content-Length: ${body.length}`,
+      '',
+      '',
+    ].join('\r\n'),
+  );
+  socket.write(body);
+  socket.end();
+}
+
+function writeWebSocketUpgradeResponse(socket, statusCode, statusMessage, rawHeaders) {
+  const headerLines = [];
+
+  for (let index = 0; index < rawHeaders.length; index += 2) {
+    const name = rawHeaders[index];
+    const value = rawHeaders[index + 1] ?? '';
+    if (!name) continue;
+    const normalized = name.toLowerCase();
+    if (hopByHopHeaders.has(normalized) && normalized !== 'connection' && normalized !== 'upgrade') {
+      continue;
+    }
+    headerLines.push(`${name}: ${value}`);
+  }
+
+  socket.write([`HTTP/1.1 ${statusCode} ${statusMessage}`, ...headerLines, '', ''].join('\r\n'));
+}
+
+function pipeWebSocketSockets(clientSocket, upstreamSocket, clientHead, upstreamHead) {
+  clientSocket.on('error', () => {
+    upstreamSocket.destroy();
+  });
+  upstreamSocket.on('error', () => {
+    clientSocket.destroy();
+  });
+
+  clientSocket.on('end', () => {
+    upstreamSocket.end();
+  });
+  upstreamSocket.on('end', () => {
+    clientSocket.end();
+  });
+
+  clientSocket.on('close', () => {
+    upstreamSocket.destroy();
+  });
+  upstreamSocket.on('close', () => {
+    clientSocket.destroy();
+  });
+
+  if (upstreamHead.length > 0) {
+    clientSocket.write(upstreamHead);
+  }
+  if (clientHead.length > 0) {
+    upstreamSocket.write(clientHead);
+  }
+
+  clientSocket.pipe(upstreamSocket);
+  upstreamSocket.pipe(clientSocket);
+  clientSocket.resume();
+  upstreamSocket.resume();
+}
+
+function relayManagedPtyWebSocket(req, socket, head, managedConfig) {
+  const requestURL = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+  const upstreamURL = buildManagedUpstreamURL(
+    managedConfig.upstreamURL,
+    requestURL.pathname.slice('/api'.length),
+    requestURL.search,
+  );
+  const upstreamRequest = (upstreamURL.protocol === 'https:' ? requestHTTPS : requestHTTP)(upstreamURL, {
+    method: 'GET',
+    headers: toNodeRequestHeaders(createManagedUpstreamWebSocketHeaders(req.headers, managedConfig)),
+  });
+
+  let finished = false;
+
+  const fail = (statusCode, statusMessage, payload) => {
+    if (finished) return;
+    finished = true;
+    upstreamRequest.destroy();
+    writeSocketJsonError(socket, statusCode, statusMessage, payload);
+  };
+
+  socket.pause();
+  socket.on('error', () => {
+    upstreamRequest.destroy();
+  });
+  socket.on('close', () => {
+    upstreamRequest.destroy();
+  });
+
+  upstreamRequest.on('response', (response) => {
+    const chunks = [];
+
+    response.on('data', (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    response.on('end', () => {
+      if (finished) return;
+      finished = true;
+      writeRawSocketResponse(
+        socket,
+        response.statusCode ?? 502,
+        response.statusMessage ?? 'Bad Gateway',
+        response.rawHeaders,
+        chunks.length > 0 ? Buffer.concat(chunks) : null,
+      );
     });
   });
+
+  upstreamRequest.on('upgrade', (response, upstreamSocket, upstreamHead) => {
+    if (finished) {
+      upstreamSocket.destroy();
+      return;
+    }
+
+    finished = true;
+    clientSocketCleanup();
+    upstreamSocket.pause();
+    writeWebSocketUpgradeResponse(
+      socket,
+      response.statusCode ?? 101,
+      response.statusMessage ?? 'Switching Protocols',
+      response.rawHeaders,
+    );
+    pipeWebSocketSockets(socket, upstreamSocket, head, upstreamHead);
+  });
+
+  upstreamRequest.on('error', () => {
+    fail(502, 'Bad Gateway', { error: 'Upstream request failed' });
+  });
+
+  upstreamRequest.end();
+
+  function clientSocketCleanup() {
+    socket.removeAllListeners('error');
+    socket.removeAllListeners('close');
+  }
+}
+
+const managedConfig = readManagedConfig(process.env);
+
+if (managedConfig) {
+  app.get('/api/bootstrap', (c) => c.json(managedBootstrap));
+  app.get('/api/global/event', (c) => relayManagedSseRequest(c, managedConfig));
+  for (const route of managedRestRoutes) {
+    app.all(`/api${route}`, (c) => relayManagedRestRequest(c, managedConfig));
+  }
+  app.all('/api/*', (c) => c.json(managedDeniedResponse, 404));
+  app.use('*', serveStatic({ root: join(import.meta.dirname, 'dist/') }));
 } else {
   app.use('*', serveStatic({ root: join(import.meta.dirname, 'dist/') }));
 }
 
-serve(
-  {
-    fetch: app.fetch,
-    port: process.env.VIS_PORT || 3000,
-  },
-  (info) => {
-    console.log(`Listening on http://localhost:${info.port}`);
-  },
-);
+const port = process.env.VIS_PORT || 3000;
+const server = createAdaptorServer({
+  fetch: app.fetch,
+});
+
+if (managedConfig) {
+  server.on('upgrade', (req, socket, head) => {
+    if (!isManagedPtyUpgradeRequest(req)) {
+      socket.end('HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\n\r\n');
+      return;
+    }
+
+    relayManagedPtyWebSocket(req, socket, head, managedConfig);
+  });
+}
+
+server.listen(port, () => {
+  console.log(`Listening on http://localhost:${port}`);
+});

@@ -22,6 +22,8 @@ export type SseConnection = {
   isConnected: () => boolean;
 };
 
+const MANAGED_SSE_PATH = '/api/global/event';
+
 function normalizeBaseUrl(baseUrl: string) {
   return baseUrl.replace(/\/+$/, '');
 }
@@ -118,7 +120,6 @@ export function createSseConnection(callbacks: SseConnectionCallbacks): SseConne
   }
 
   function startFetch(options: SseConnectionOptions, isReconnect: boolean) {
-    const effectiveBaseUrl = normalizeBaseUrl(options.baseUrl);
     const headers: Record<string, string> = {
       Accept: 'text/event-stream',
     };
@@ -128,7 +129,7 @@ export function createSseConnection(callbacks: SseConnectionCallbacks): SseConne
 
     void (async () => {
       try {
-        const response = await fetch(`${effectiveBaseUrl}/global/event`, {
+        const response = await fetch(MANAGED_SSE_PATH, {
           signal: abortController!.signal,
           headers,
         });

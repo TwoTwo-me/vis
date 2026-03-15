@@ -15,8 +15,6 @@ import {
   getVcsInfo,
   listProjects,
   listSessions,
-  setAuthorization,
-  setBaseUrl,
 } from '../utils/opencode';
 import { createSseConnection, type SseConnection } from '../utils/sseConnection';
 import { createStateBuilder } from '../utils/stateBuilder';
@@ -27,10 +25,10 @@ type SharedWorkerSelf = {
 
 declare const self: SharedWorkerSelf;
 
+const MANAGED_CONNECTION_KEY = 'vis-managed-global-events';
+
 type ConnectionState = {
   key: string;
-  baseUrl: string;
-  authorization?: string;
   ports: Set<MessagePort>;
   client: SseConnection;
   connected: boolean;
@@ -48,8 +46,8 @@ const connections = new Map<string, ConnectionState>();
 const portToKey = new Map<MessagePort, string>();
 let opencodeQueue: Promise<void> = Promise.resolve();
 
-function toKey(baseUrl: string, authorization?: string) {
-  return `${baseUrl.replace(/\/+$/, '')}\u0000${authorization ?? ''}`;
+function toKey() {
+  return MANAGED_CONNECTION_KEY;
 }
 
 function send(port: MessagePort, message: WorkerToTabMessage) {
@@ -555,12 +553,8 @@ function parseWorkerStatePacket(packet: SsePacket): WorkerStatePacket | null {
   }
 }
 
-function queueOpencodeTask<T>(state: ConnectionState, task: () => Promise<T>): Promise<T> {
-  const run = opencodeQueue.then(async () => {
-    setBaseUrl(state.baseUrl);
-    setAuthorization(state.authorization);
-    return task();
-  });
+function queueOpencodeTask<T>(runner: () => Promise<T>): Promise<T> {
+  const run = opencodeQueue.then(() => runner());
   opencodeQueue = run.then(
     () => undefined,
     () => undefined,
@@ -621,7 +615,7 @@ async function resolveUnknownSessionDirectory(state: ConnectionState, info: Sess
   const directory = normalizeDirectory(info.directory);
   if (!directory) return;
 
-  const projectInfo = await queueOpencodeTask(state, async () => {
+      const projectInfo = await queueOpencodeTask(async () => {
     const raw = await getCurrentProject(directory);
     return isProjectInfo(raw) ? raw : null;
   }).catch(() => null);
@@ -793,7 +787,7 @@ async function bootstrapState(state: ConnectionState): Promise<void> {
   }
 
   const builder = createStateBuilder();
-  const run = queueOpencodeTask(state, async () => {
+  const run = queueOpencodeTask(async () => {
     const projects = asObjectArray<Record<string, unknown>>(await listProjects());
     const directories = new Set<string>(['']);
 
@@ -877,13 +871,11 @@ function detachPort(port: MessagePort) {
   cleanupIfUnused(state);
 }
 
-function createConnectionState(baseUrl: string, authorization?: string) {
-  const key = toKey(baseUrl, authorization);
+function createConnectionState() {
+  const key = toKey();
   let state: ConnectionState;
   state = {
     key,
-    baseUrl,
-    authorization,
     ports: new Set<MessagePort>(),
     connected: false,
     stateBuilder: createStateBuilder(),
@@ -915,15 +907,15 @@ function createConnectionState(baseUrl: string, authorization?: string) {
       },
     }),
   };
-  state.client.connect({ baseUrl, authorization });
+  state.client.connect({ baseUrl: MANAGED_CONNECTION_KEY });
   return state;
 }
 
-function attachPort(port: MessagePort, baseUrl: string, authorization?: string) {
+function attachPort(port: MessagePort) {
   detachPort(port);
-  const key = toKey(baseUrl, authorization);
+  const key = toKey();
   const existing = connections.get(key);
-  const state = existing ?? createConnectionState(baseUrl, authorization);
+  const state = existing ?? createConnectionState();
   if (!existing) {
     connections.set(key, state);
   }
@@ -952,7 +944,7 @@ function handleMessage(port: MessagePort, event: MessageEvent<TabToWorkerMessage
       send(port, { type: 'connection.error', message: 'SSE base URL is empty.' });
       return;
     }
-    attachPort(port, message.baseUrl, message.authorization);
+    attachPort(port);
     return;
   }
 
@@ -970,7 +962,7 @@ function handleMessage(port: MessagePort, event: MessageEvent<TabToWorkerMessage
     const directory = normalizeDirectory(message.directory);
     if (!directory) return;
 
-    void queueOpencodeTask(state, async () => {
+  void queueOpencodeTask(async () => {
       const [rawSessions, rawStatuses] = await Promise.all([
         listSessions({ directory, roots: true }),
         getSessionStatusMap(directory),

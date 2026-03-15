@@ -122,7 +122,7 @@ async function runOneShotPtyCommand(command: string, args: string[]): Promise<st
   }
 
   return new Promise<string>((resolve, reject) => {
-    const url = opencodeApi.createWsUrl(`/pty/${pty.id}/connect`, { directory });
+    const url = opencodeApi.createWsUrl(`/api/pty/${pty.id}/connect`, { directory });
     const socket = new WebSocket(url);
     const decoder = new TextDecoder();
     let captured = '';

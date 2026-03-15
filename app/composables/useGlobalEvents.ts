@@ -8,10 +8,7 @@ import SseSharedWorker from '../workers/sse-shared-worker?sharedworker';
 type EventKey = keyof GlobalEventMap;
 type ConnectOptions = { failFast?: boolean; timeoutMs?: number };
 
-type CredentialsBinding = {
-  baseUrl: Ref<string>;
-  authHeader: Ref<string | undefined>;
-};
+const MANAGED_CONNECTION_KEY = 'vis-managed-global-events';
 
 type TransportCallbacks = {
   onPacket: (packet: SsePacket) => void;
@@ -187,12 +184,12 @@ function createDirectTransport(callbacks: TransportCallbacks): Transport {
   }
 
   return {
-    async connect(baseUrl, authorization, options = {}) {
+    async connect(baseUrl, _authorization, options = {}) {
       const normalized = normalizeBaseUrl(baseUrl);
       if (!normalized) {
         throw new Error('SSE base URL is empty.');
       }
-      connection.connect({ baseUrl: normalized, authorization });
+      connection.connect({ baseUrl: normalized });
       if (options.failFast) {
         await waitForOpen(options.timeoutMs ?? 5000);
       }
@@ -285,7 +282,7 @@ function createSharedWorkerTransport(callbacks: TransportCallbacks): Transport {
   }
 
   return {
-    async connect(baseUrl, authorization, options = {}) {
+    async connect(baseUrl, _authorization, options = {}) {
       const normalized = normalizeBaseUrl(baseUrl);
       if (!normalized) {
         throw new Error('SSE base URL is empty.');
@@ -294,7 +291,6 @@ function createSharedWorkerTransport(callbacks: TransportCallbacks): Transport {
       const message: TabToWorkerMessage = {
         type: 'connect',
         baseUrl: normalized,
-        authorization,
       };
       ensureWorker().port.postMessage(message);
       if (options.failFast) {
@@ -321,7 +317,7 @@ function createSharedWorkerTransport(callbacks: TransportCallbacks): Transport {
   };
 }
 
-export function useGlobalEvents(credentials: CredentialsBinding) {
+export function useGlobalEvents(baseUrl: Ref<string>) {
   const emitter = new TypedEmitter<GlobalEventMap>();
   let workerMessageHandler: ((message: WorkerToTabMessage) => boolean) | undefined;
 
@@ -353,28 +349,28 @@ export function useGlobalEvents(credentials: CredentialsBinding) {
   let requested = false;
   let lastKey = '';
   const stopCredentialSync = watch(
-    [() => credentials.baseUrl.value, () => credentials.authHeader.value],
-    ([baseUrl, authHeader]) => {
+    () => baseUrl.value,
+    (currentBaseUrl) => {
       if (!requested) return;
-      const normalized = normalizeBaseUrl(baseUrl);
+      const normalized = normalizeBaseUrl(currentBaseUrl);
       if (!normalized) {
         transport.disconnect();
         lastKey = '';
         return;
       }
-      const nextKey = `${normalized}\u0000${authHeader ?? ''}`;
+      const nextKey = MANAGED_CONNECTION_KEY;
       if (nextKey === lastKey) return;
       lastKey = nextKey;
-      void transport.connect(normalized, authHeader);
+      void transport.connect(nextKey, undefined);
     },
   );
 
   async function connect(options: ConnectOptions = {}) {
-    const baseUrl = normalizeBaseUrl(credentials.baseUrl.value);
-    if (!baseUrl) throw new Error('SSE base URL is empty.');
+    const normalizedBaseUrl = normalizeBaseUrl(baseUrl.value);
+    if (!normalizedBaseUrl) throw new Error('SSE base URL is empty.');
     requested = true;
-    lastKey = `${baseUrl}\u0000${credentials.authHeader.value ?? ''}`;
-    await transport.connect(baseUrl, credentials.authHeader.value, options);
+    lastKey = MANAGED_CONNECTION_KEY;
+    await transport.connect(MANAGED_CONNECTION_KEY, undefined, options);
   }
 
   function disconnect() {
@@ -476,9 +472,9 @@ export function useGlobalEvents(credentials: CredentialsBinding) {
   }
 
   const stopAutoDisconnect = watch(
-    () => credentials.baseUrl.value,
-    (baseUrl) => {
-      if (baseUrl.trim()) return;
+    () => baseUrl.value,
+    (currentBaseUrl) => {
+      if (currentBaseUrl.trim()) return;
       disconnect();
     },
   );

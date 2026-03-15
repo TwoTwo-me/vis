@@ -6,15 +6,13 @@ type RequestOptions = {
   signal?: AbortSignal;
 };
 
+const MANAGED_API_PREFIX = '/api';
+const MANAGED_BOOTSTRAP_PATH = '/api/bootstrap';
+
 let configuredBaseUrl = '';
-let configuredAuthorization: string | undefined;
 
 export function setBaseUrl(baseUrl: string) {
   configuredBaseUrl = baseUrl.replace(/\/+$/, '');
-}
-
-export function setAuthorization(authorization: string | undefined) {
-  configuredAuthorization = authorization;
 }
 
 function getBaseUrlOrThrow() {
@@ -36,7 +34,21 @@ function buildQuery(params?: Record<string, QueryValue>) {
 }
 
 function createUrl(path: string, params?: Record<string, QueryValue>) {
-  return `${getBaseUrlOrThrow()}${path}${buildQuery(params)}`;
+  const managedPath = path.startsWith(MANAGED_API_PREFIX) ? path : `${MANAGED_API_PREFIX}${path}`;
+  return `${managedPath}${buildQuery(params)}`;
+}
+
+function buildWsBaseUrl(baseUrl: string) {
+  return baseUrl.replace(/^http/, 'ws');
+}
+
+function getBrowserOriginBaseUrl() {
+  if (typeof window === 'undefined' || !window.location?.origin) return '';
+  return window.location.origin.replace(/\/+$/, '');
+}
+
+function isPtyConnectPath(path: string) {
+  return /^\/(?:api\/)?pty\/[^/]+\/connect$/.test(path);
 }
 
 async function parseJson(response: Response) {
@@ -57,7 +69,6 @@ function buildHeaders(options?: RequestOptions, contentType?: string) {
   const headers: Record<string, string> = {};
   if (contentType) headers['Content-Type'] = contentType;
   if (options?.instanceDirectory) headers['x-opencode-directory'] = options.instanceDirectory;
-  if (configuredAuthorization) headers['Authorization'] = configuredAuthorization;
   return Object.keys(headers).length > 0 ? headers : undefined;
 }
 
@@ -93,8 +104,12 @@ export function createWsUrl(
   params?: Record<string, QueryValue>,
   credentials?: { username: string; password: string },
 ) {
-  const wsBase = getBaseUrlOrThrow().replace(/^http/, 'ws');
-  const url = `${wsBase}${path}${buildQuery(params)}`;
+  const ptyConnectPath = isPtyConnectPath(path);
+  const wsBase = buildWsBaseUrl(
+    ptyConnectPath ? getBrowserOriginBaseUrl() || getBaseUrlOrThrow() : getBaseUrlOrThrow(),
+  );
+  const effectivePath = ptyConnectPath && path.startsWith('/pty/') ? `${MANAGED_API_PREFIX}${path}` : path;
+  const url = `${wsBase}${effectivePath}${buildQuery(params)}`;
 
   if (!credentials) return url;
 
@@ -104,6 +119,10 @@ export function createWsUrl(
     urlObj.password = credentials.password;
   }
   return urlObj.toString();
+}
+
+export function getManagedBootstrap() {
+  return getJson(MANAGED_BOOTSTRAP_PATH) as Promise<unknown>;
 }
 
 export function getPathInfo(options?: RequestOptions) {
@@ -142,11 +161,11 @@ export function getSessionDiff(payload: { sessionID: string; directory?: string 
 }
 
 export function listProjects(directory?: string) {
-  return getJson('/project', { directory }) as Promise<unknown>;
+  return getJson('/api/project', { directory }) as Promise<unknown>;
 }
 
 export function getCurrentProject(directory?: string) {
-  return getJson('/project/current', { directory }) as Promise<unknown>;
+  return getJson('/api/project/current', { directory }) as Promise<unknown>;
 }
 
 export function listSessions(
