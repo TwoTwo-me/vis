@@ -1,0 +1,94 @@
+name: Sync Upstream Manually
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: Upstream ref to replay patches onto
+        required: true
+        default: main
+      target_branch:
+        description: Fork branch to open the sync PR against
+        required: true
+        default: main
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  sync-upstream:
+    runs-on: ubuntu-latest
+    env:
+      UPSTREAM_REPO: xenodrive/vis
+      SYNC_BRANCH: sync/upstream-${{ github.run_id }}
+      PATCH_COMMITS: >-
+        61f3b8d
+        9515ac6
+        a1d1e36
+        d64e9b2
+        80fa28c
+    steps:
+      - name: Checkout fork
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Configure git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Fetch upstream and fork branches
+        run: |
+          git remote add upstream https://github.com/${UPSTREAM_REPO}.git
+          git fetch --no-tags upstream ${{ inputs.upstream_ref }}
+          git fetch --no-tags origin ${{ inputs.target_branch }}
+
+      - name: Build sync branch from upstream
+        run: |
+          git checkout -B "$SYNC_BRANCH" "upstream/${{ inputs.upstream_ref }}"
+          for commit in $PATCH_COMMITS; do
+            git cherry-pick "$commit"
+          done
+
+      - name: Install dependencies
+        run: pnpm -r install --frozen-lockfile
+
+      - name: Build
+        run: pnpm build
+
+      - name: Managed tests
+        run: pnpm test:managed
+
+      - name: Push sync branch
+        run: git push --force-with-lease origin "$SYNC_BRANCH"
+
+      - name: Create pull request
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          body_file=$(mktemp)
+          cat > "$body_file" <<'EOF'
+          ## Summary
+
+          - replay the maintained managed-mode patch stack onto `upstream/${{ inputs.upstream_ref }}`
+          - run `pnpm build` and `pnpm test:managed`
+          - review this PR before merging into `${{ inputs.target_branch }}`
+
+          If you intentionally changed the custom fork behavior, update the `PATCH_COMMITS` list in `.github/workflows/sync-upstream.yaml` before the next sync.
+          EOF
+          gh pr create \
+            --base "${{ inputs.target_branch }}" \
+            --head "$SYNC_BRANCH" \
+            --title "Sync upstream ${{ inputs.upstream_ref }} into ${{ inputs.target_branch }}" \
+            --body-file "$body_file"

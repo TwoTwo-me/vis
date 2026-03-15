@@ -75,6 +75,21 @@ Or run the combined check:
 pnpm verify:managed
 ```
 
+## Upstream Sync
+
+This fork includes a manual GitHub Action at `.github/workflows/sync-upstream.yaml`.
+
+Use the **Actions -> Sync Upstream Manually -> Run workflow** button when you want to replay this fork's maintained patch stack on top of the latest `xenodrive/vis` upstream.
+
+The workflow:
+
+- checks out the latest upstream ref you choose (default: `main`)
+- cherry-picks this fork's maintained custom commits on top
+- runs `pnpm build` and `pnpm test:managed`
+- pushes a `sync/upstream-*` branch and opens a PR back into your fork's `main`
+
+If you intentionally change the fork-specific behavior later, update the `PATCH_COMMITS` list in `.github/workflows/sync-upstream.yaml` so the manual sync action replays the right commits.
+
 ## Development
 
 ```bash
