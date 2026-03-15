@@ -22,7 +22,6 @@
           @open-directory="openProjectPicker"
           @edit-project="handleEditProject"
           @open-settings="isSettingsOpen = true"
-          @logout="handleLogout"
           @dropdown-closed="focusInput"
         />
       </header>
@@ -194,54 +193,18 @@
             </div>
           </div>
         </div>
-        <div v-if="uiInitState === 'login'" class="app-login-form">
-          <p class="app-loading-title">Connect to OpenCode Server</p>
-          <div class="app-login-fields">
-            <input
-              v-model="loginUsername"
-              type="text"
-              class="app-login-input"
-              placeholder="Username"
-              name="username"
-              :disabled="!loginRequiresAuth"
-              @keydown.enter="handleLogin"
-            />
-            <input
-              v-model="loginPassword"
-              type="password"
-              class="app-login-input"
-              placeholder="Password"
-              :disabled="!loginRequiresAuth"
-              @keydown.enter="handleLogin"
-            />
-            <label class="app-login-checkbox">
-              <input v-model="loginRequiresAuth" type="checkbox" />
-              The server requires authentication
-            </label>
-            <input
-              v-model="loginUrl"
-              type="text"
-              class="app-login-input"
-              placeholder="http://localhost:4096"
-              name="url"
-              @keydown.enter="handleLogin"
-            />
-          </div>
-          <p v-if="initErrorMessage" class="app-loading-message app-error-message">
-            {{ initErrorMessage }}
-          </p>
-          <button type="button" class="app-loading-retry bg-indigo-500!" @click="handleLogin">
-            Connect
-          </button>
-
-          <Welcome :theme="shikiTheme" class="mt-8" />
-        </div>
-        <div v-else>
+        <div v-if="uiInitState === 'loading'">
           <div class="app-loading-spinner" aria-hidden="true"></div>
           <p class="app-loading-title">Loading session data...</p>
           <p class="app-loading-message">
-            {{ uiInitState === 'error' ? initErrorMessage : initLoadingMessage }}
+            {{ initLoadingMessage }}
           </p>
+          <div class="app-loading-actions">
+          </div>
+        </div>
+        <div v-else>
+          <p class="app-loading-title app-error-message">{{ initErrorTitle }}</p>
+          <p class="app-loading-message">{{ initErrorMessage }}</p>
           <div class="app-loading-actions">
             <button
               v-if="uiInitState === 'error'"
@@ -250,14 +213,6 @@
               @click="startInitialization"
             >
               Retry
-            </button>
-            <button
-              v-if="uiInitState === 'loading' && connectionState === 'connecting'"
-              type="button"
-              class="app-loading-retry app-loading-abort"
-              @click="handleAbortInit"
-            >
-              Abort
             </button>
           </div>
         </div>
@@ -293,7 +248,6 @@ import {
   reactive,
   ref,
   watch,
-  watchEffect,
 } from 'vue';
 import { bundledThemes } from 'shiki/bundle/web';
 import { Terminal } from '@xterm/xterm';
@@ -308,7 +262,6 @@ import ThreadHistoryContent from './components/ThreadHistoryContent.vue';
 import SubagentContent from './components/ToolWindow/Subagent.vue';
 import WebContent from './components/ToolWindow/Web.vue';
 import SidePanel from './components/SidePanel.vue';
-import Welcome from './components/Welcome.vue';
 import TopPanel, {
   type TopPanelNotificationSession,
   type TopPanelWorktree,
@@ -353,18 +306,14 @@ import {
 import * as opencodeApi from './utils/opencode';
 import { opencodeTheme, resolveTheme, resolveAgentColor } from './utils/theme';
 import { splitFileContentDirectoryAndPath } from './utils/path';
-import { useCredentials } from './composables/useCredentials';
-import { useSettings } from './composables/useSettings';
 import {
-  StorageKeys,
-  storageGet,
-  storageKey,
-  storageRemove,
-  storageSet,
-  storageSetJSON,
-} from './utils/storageKeys';
+  clearLegacyUpstreamCredentials,
+  useManagedConnection,
+} from './composables/useCredentials';
+import { useSettings } from './composables/useSettings';
+import { StorageKeys, storageGet, storageKey, storageSet, storageSetJSON } from './utils/storageKeys';
 
-const credentials = useCredentials();
+const managedConnection = useManagedConnection();
 const { suppressAutoWindows } = useSettings();
 const FOLLOW_THRESHOLD_PX = 24;
 const FILE_VIEWER_WINDOW_WIDTH = 840;
@@ -569,6 +518,7 @@ type ShellSession = {
 type CommitSnapshotEntry = {
   status: string;
   file: string;
+  oldPath?: string;
   before: string;
   after: string;
   beforeBase64: string;
@@ -603,6 +553,24 @@ type ComposerDraft = {
   updatedAt: number;
   rev: number;
   writerTabId: string;
+};
+
+type ManagedFailurePhase = 'bootstrap' | 'events' | 'state';
+
+type ManagedFailure = {
+  phase: ManagedFailurePhase;
+  message: string;
+  statusCode?: number;
+};
+
+type ManagedBootstrapPayload = {
+  mode?: string;
+  auth?: string;
+  capabilities?: {
+    rest?: boolean;
+    sse?: boolean;
+    pty?: boolean;
+  };
 };
 
 const fw = useFloatingWindows();
@@ -973,19 +941,17 @@ const sendStatus = ref('Ready');
 const isSending = ref(false);
 const isAborting = ref(false);
 const isBootstrapping = ref(false);
-const uiInitState = ref<'loading' | 'ready' | 'error' | 'login'>('loading');
-const initLoadingMessage = ref('Connecting to server...');
+const uiInitState = ref<'loading' | 'ready' | 'error'>('loading');
+const initLoadingMessage = ref('Connecting to managed server...');
+const initErrorTitle = ref('Server unavailable');
 const initErrorMessage = ref('');
+const initializationFailure = ref<ManagedFailure | null>(null);
 const connectionState = ref<'connecting' | 'bootstrapping' | 'ready' | 'reconnecting' | 'error'>(
   'connecting',
 );
 const reconnectingMessage = ref('');
 let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 let initializationInFlight = false;
-const loginUrl = ref('http://localhost:4096');
-const loginUsername = ref('');
-const loginPassword = ref('');
-const loginRequiresAuth = ref(false);
 const retryStatus = ref<{
   message: string;
   next: number;
@@ -1417,6 +1383,59 @@ function validateSelectedSession() {
 function toErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function isManagedFailure(value: unknown): value is ManagedFailure {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return (
+    (record.phase === 'bootstrap' || record.phase === 'events' || record.phase === 'state') &&
+    typeof record.message === 'string'
+  );
+}
+
+function toManagedFailure(error: unknown, fallbackPhase: ManagedFailurePhase): ManagedFailure {
+  if (isManagedFailure(error)) return error;
+  return {
+    phase: fallbackPhase,
+    message: toErrorMessage(error),
+  };
+}
+
+function matchesManagedFailureStatus(failure: ManagedFailure, statusCode: number) {
+  if (failure.statusCode === statusCode) return true;
+  return new RegExp(`(?:HTTP\\s+|\\()${statusCode}(?:\\)|\\b)`).test(failure.message);
+}
+
+function describeManagedFailure(failure: ManagedFailure) {
+  if (failure.phase === 'bootstrap' && [401, 403].some((status) => matchesManagedFailureStatus(failure, status))) {
+    return {
+      title: 'Access denied',
+      detail: 'This managed deployment requires edge access before session data can load.',
+    };
+  }
+
+  if ([401, 403].some((status) => matchesManagedFailureStatus(failure, status))) {
+    return {
+      title: 'Upstream authentication failed',
+      detail: 'The managed server could not authenticate with the upstream OpenCode service.',
+    };
+  }
+
+  return {
+    title: 'Server unavailable',
+    detail: 'The managed server could not load data from the upstream OpenCode service.',
+  };
+}
+
+function showManagedFailure(error: unknown, fallbackPhase: ManagedFailurePhase) {
+  const failure = toManagedFailure(error, fallbackPhase);
+  const description = describeManagedFailure(failure);
+  initErrorTitle.value = description.title;
+  initErrorMessage.value = description.detail;
+  initializationFailure.value = failure;
+  connectionState.value = 'error';
+  uiInitState.value = 'error';
 }
 
 const resolvedTheme = computed(() => resolveTheme(opencodeTheme, 'dark'));
@@ -2485,16 +2504,17 @@ async function bootstrapSelections() {
   isBootstrapping.value = true;
   try {
     if (!serverState.bootstrapped.value) {
-      await new Promise<void>((resolve) => {
-        const stop = watch(
-          bootstrapReady,
-          (ready) => {
-            if (!ready) return;
+      await new Promise<void>((resolve, reject) => {
+        const stop = watch([bootstrapReady, initializationFailure], ([ready, failure]) => {
+          if (failure) {
             stop();
-            resolve();
-          },
-          { immediate: true },
-        );
+            reject(failure);
+            return;
+          }
+          if (!ready) return;
+          stop();
+          resolve();
+        }, { immediate: true });
       });
     }
 
@@ -3160,24 +3180,38 @@ function disposeShellWindows() {
 }
 
 let shellDirectory = '';
+let shellRestoreInFlight: Promise<void> | null = null;
 
 async function restoreShellSessions() {
   const directory = activeDirectory.value || '';
+  if (!directory) return;
   const sandboxChanged = directory !== shellDirectory;
-  shellDirectory = directory;
-  if (sandboxChanged) {
-    disposeShellWindows();
+  if (shellRestoreInFlight && shellDirectory === directory) {
+    return shellRestoreInFlight;
   }
-  try {
-    const ptys = await fetchPtyList(directory || undefined);
-    ptys.forEach((pty) => {
-      if (pty.status === 'exited') return;
-      if (pty.title === 'One-shot PTY' || pty.title === 'Commit Snapshot') return;
-      ensureShellWindow(pty);
-    });
-  } catch (error) {
-    log('PTY restore failed', error);
-  }
+  const run = (async () => {
+    shellDirectory = directory;
+    if (sandboxChanged) {
+      disposeShellWindows();
+    }
+    try {
+      const ptys = await fetchPtyList(directory || undefined);
+      ptys.forEach((pty) => {
+        if (pty.status === 'exited') return;
+        if (pty.title === 'One-shot PTY' || pty.title === 'Commit Snapshot') return;
+        ensureShellWindow(pty);
+      });
+    } catch (error) {
+      log('PTY restore failed', error);
+    }
+  })();
+  const trackedRun = run.finally(() => {
+    if (shellRestoreInFlight === trackedRun) {
+      shellRestoreInFlight = null;
+    }
+  });
+  shellRestoreInFlight = trackedRun;
+  return trackedRun;
 }
 
 async function openShellFromInput(input: string) {
@@ -3223,6 +3257,7 @@ function parseCommitSnapshotOutput(rawOutput: string): CommitSnapshotResult {
     | {
         status: string;
         file: string;
+        oldPath?: string;
         before: string[];
         after: string[];
       }
@@ -3239,6 +3274,7 @@ function parseCommitSnapshotOutput(rawOutput: string): CommitSnapshotResult {
     files.push({
       status: current.status,
       file: current.file,
+      oldPath: current.oldPath,
       before: decodeCommitSnapshotBase64(beforeBase64),
       after: decodeCommitSnapshotBase64(afterBase64),
       beforeBase64,
@@ -3257,10 +3293,11 @@ function parseCommitSnapshotOutput(rawOutput: string): CommitSnapshotResult {
     if (line.startsWith('##FILE\t')) {
       pushCurrent();
       const payload = line.slice('##FILE\t'.length);
-      const separator = payload.indexOf('\t');
-      const status = separator >= 0 ? payload.slice(0, separator) : payload;
-      const file = separator >= 0 ? payload.slice(separator + 1) : '';
-      current = { status, file, before: [], after: [] };
+      const parts = payload.split('\t');
+      const status = parts[0] ?? '';
+      const oldPath = parts.length >= 3 ? parts[1] : undefined;
+      const file = parts.length >= 3 ? parts[2] ?? '' : parts[1] ?? '';
+      current = { status, file, oldPath, before: [], after: [] };
       section = 'none';
       continue;
     }
@@ -3980,9 +4017,6 @@ async function reloadSelectedSessionState() {
     if (msg.roots.value.length === 0) {
       scrollOutputPanelToBottom(false);
     }
-    if (uiInitState.value === 'ready') {
-      await restoreShellSessions();
-    }
     void reloadTodosForAllowedSessions();
     const directory = activeDirectory.value || undefined;
     void fetchPendingPermissions(directory);
@@ -4130,7 +4164,7 @@ const toolRendererHelpers = {
   WebContent,
 };
 
-const ge = useGlobalEvents(credentials);
+const ge = useGlobalEvents(managedConnection.baseUrl);
 ge.setWorkerMessageHandler(serverState.handleStateMessage);
 serverState.setNotificationShowHandler((message) => {
   showBrowserNotification(message.projectId, message.sessionId, message.kind);
@@ -4148,10 +4182,13 @@ watch(selectedSessionId, reloadSelectedSessionState, { immediate: true });
 
 watch([selectedProjectId, selectedSessionId], syncActiveSelectionToWorker, { immediate: true });
 
-watchEffect(() => {
-  opencodeApi.setBaseUrl(credentials.baseUrl.value);
-  opencodeApi.setAuthorization(credentials.authHeader.value);
-});
+watch(
+  () => managedConnection.baseUrl.value,
+  (baseUrl) => {
+    opencodeApi.setBaseUrl(baseUrl);
+  },
+  { immediate: true },
+);
 
 function formatToolValue(value: unknown) {
   if (typeof value === 'string') return value;
@@ -4547,6 +4584,7 @@ async function openAllGitDiff(mode: WorktreeSnapshotMode = 'all') {
     if (!fw.has(key)) return;
 
     const first = snapshot.files[0];
+
     const title =
       snapshot.files.length === 1 ? first.file : `${snapshot.files.length} files changed`;
     const diffTabs =
@@ -5206,7 +5244,6 @@ function handlePtyEvent(event: {
 }) {
   const ptyId = event.id ?? event.info?.id;
   if (!ptyId) return;
-  if (!shellSessionsByPtyId.has(ptyId)) return;
   if (event.type === 'pty.exited') {
     const exitCode = typeof event.exitCode === 'number' ? event.exitCode : -1;
     const waiter = shellExitWaiters.get(ptyId);
@@ -5214,6 +5251,7 @@ function handlePtyEvent(event: {
       shellExitWaiters.delete(ptyId);
       waiter(exitCode);
     }
+    if (!shellSessionsByPtyId.has(ptyId)) return;
     const session = shellSessionsByPtyId.get(ptyId);
     if (session?.closeOnSuccess && exitCode !== 0) {
       session.terminal.write(`\r\n\u001b[31m[Command failed: ${exitCode}]\u001b[0m\r\n`);
@@ -5224,6 +5262,9 @@ function handlePtyEvent(event: {
   }
   if (event.info) {
     const existing = shellSessionsByPtyId.get(event.info.id);
+    if (!existing) {
+      return;
+    }
     if (existing) {
       existing.pty = event.info;
       if (event.info.title) {
@@ -5241,17 +5282,51 @@ async function startInitialization() {
   if (initializationInFlight) return;
   initializationInFlight = true;
   uiInitState.value = 'loading';
+  initErrorTitle.value = 'Server unavailable';
   initErrorMessage.value = '';
+  initializationFailure.value = null;
   reconnectingMessage.value = '';
+  clearLegacyUpstreamCredentials();
   try {
+    initLoadingMessage.value = 'Loading managed server...';
+    let bootstrap: ManagedBootstrapPayload;
+    try {
+      bootstrap = (await opencodeApi.getManagedBootstrap()) as ManagedBootstrapPayload;
+    } catch (error) {
+      throw {
+        phase: 'bootstrap',
+        message: toErrorMessage(error),
+      } satisfies ManagedFailure;
+    }
+
+    if (bootstrap?.mode !== 'managed') {
+      throw {
+        phase: 'bootstrap',
+        message: 'Managed bootstrap returned an unexpected mode.',
+      } satisfies ManagedFailure;
+    }
+
     connectionState.value = 'connecting';
-    initLoadingMessage.value = 'Connecting to SSE stream...';
-    await ge.connect({ failFast: true, timeoutMs: 10000 });
+    initLoadingMessage.value = 'Connecting to managed event stream...';
+    try {
+      await ge.connect({ failFast: true, timeoutMs: 10000 });
+    } catch (error) {
+      throw {
+        phase: 'events',
+        message: toErrorMessage(error),
+      } satisfies ManagedFailure;
+    }
+
     connectionState.value = 'bootstrapping';
-    initLoadingMessage.value = 'Loading server path...';
-    await fetchHomePath();
-    initLoadingMessage.value = 'Loading projects and sessions...';
-    await bootstrapSelections();
+    try {
+      initLoadingMessage.value = 'Loading server path...';
+      await fetchHomePath();
+      initLoadingMessage.value = 'Loading projects and sessions...';
+      await bootstrapSelections();
+    } catch (error) {
+      throw toManagedFailure(error, 'state');
+    }
+
     if (selectedSessionId.value) {
       initLoadingMessage.value = 'Loading session history...';
       await reloadSelectedSessionState();
@@ -5271,44 +5346,10 @@ async function startInitialization() {
   } catch (error) {
     if (!initializationInFlight) return;
     ge.disconnect();
-    const msg = toErrorMessage(error);
-    connectionState.value = 'error';
-    if (/\(40[13]\)/.test(msg)) {
-      storageSet(StorageKeys.state.lastAuthError, msg);
-      credentials.clear();
-      initErrorMessage.value = msg;
-      uiInitState.value = 'login';
-    } else {
-      initErrorMessage.value = msg;
-      uiInitState.value = 'login';
-    }
+    showManagedFailure(error, 'state');
   } finally {
     initializationInFlight = false;
   }
-}
-
-function handleLogin() {
-  const u = loginRequiresAuth.value ? loginUsername.value : '';
-  const p = loginRequiresAuth.value ? loginPassword.value : '';
-  credentials.save(loginUrl.value, u, p);
-  void startInitialization();
-}
-
-function handleAbortInit() {
-  ge.disconnect();
-  initializationInFlight = false;
-  connectionState.value = 'connecting';
-  uiInitState.value = 'login';
-  initErrorMessage.value = '';
-}
-
-function handleLogout() {
-  credentials.clear();
-  ge.disconnect();
-  disposeShellWindows();
-  uiInitState.value = 'login';
-  initErrorMessage.value = '';
-  connectionState.value = 'connecting';
 }
 
 onMounted(() => {
@@ -5320,22 +5361,8 @@ onMounted(() => {
       handleWindowResize();
     });
   }
-  credentials.load();
-
-  if (credentials.isConfigured.value) {
-    loginUrl.value = credentials.url.value;
-    loginUsername.value = credentials.username.value;
-    loginPassword.value = credentials.password.value;
-    loginRequiresAuth.value = !!(credentials.username.value || credentials.password.value);
-    void startInitialization();
-  } else {
-    uiInitState.value = 'login';
-    const savedError = storageGet(StorageKeys.state.lastAuthError);
-    if (savedError) {
-      initErrorMessage.value = savedError;
-      storageRemove(StorageKeys.state.lastAuthError);
-    }
-  }
+  clearLegacyUpstreamCredentials();
+  void startInitialization();
   const availableThemes = getBundledThemeNames();
   const chosenTheme = pickShikiTheme(availableThemes);
   if (chosenTheme) shikiTheme.value = chosenTheme;
@@ -5371,21 +5398,23 @@ onMounted(() => {
   );
   globalEventUnsubscribers.push(
     ge.on('connection.error', (payload) => {
-      if (payload.statusCode === 401 || payload.statusCode === 403) {
-        const msg = `${payload.message} (HTTP ${payload.statusCode})`;
-        storageSet(StorageKeys.state.lastAuthError, msg);
-        credentials.clear();
-        uiInitState.value = 'login';
-        initErrorMessage.value = msg;
-        connectionState.value = 'error';
+      const failure: ManagedFailure = {
+        phase: connectionState.value === 'connecting' ? 'events' : 'state',
+        message: payload.message,
+        statusCode: payload.statusCode,
+      };
+
+      if (uiInitState.value !== 'ready') {
+        initializationFailure.value = failure;
         return;
       }
-      if (uiInitState.value === 'loading') {
-        connectionState.value = 'error';
-        initErrorMessage.value = 'Failed to connect to SSE stream.';
-        uiInitState.value = 'login';
+
+      if ([401, 403].some((status) => matchesManagedFailureStatus(failure, status))) {
+        ge.disconnect();
+        showManagedFailure(failure, 'events');
         return;
       }
+
       connectionState.value = 'reconnecting';
       reconnectingMessage.value = 'Reconnecting...';
     }),
@@ -5604,66 +5633,6 @@ onBeforeUnmount(() => {
   display: flex;
   gap: 8px;
   justify-content: center;
-}
-
-.app-loading-abort {
-  background: transparent;
-  border-color: #475569;
-  color: #94a3b8;
-}
-
-.app-loading-abort:hover {
-  background: #1e293b;
-  color: #e2e8f0;
-}
-
-.app-login-form {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  align-items: stretch;
-}
-
-.app-login-fields {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.app-login-input {
-  width: 100%;
-  padding: 8px 12px;
-  background: #1e293b;
-  border: 1px solid #334155;
-  border-radius: 6px;
-  color: #e2e8f0;
-  font-size: 13px;
-  box-sizing: border-box;
-}
-
-.app-login-input::placeholder {
-  color: #64748b;
-}
-
-.app-login-input:focus {
-  outline: none;
-  border-color: #475569;
-  background: #0f172a;
-}
-
-.app-login-input:disabled {
-  opacity: 0.4;
-  cursor: not-allowed;
-}
-
-.app-login-checkbox {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  color: #94a3b8;
-  font-size: 12px;
-  cursor: pointer;
-  user-select: none;
 }
 
 .app-error-message {

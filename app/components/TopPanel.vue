@@ -295,12 +295,6 @@
               Settings
             </span>
           </DropdownItem>
-          <DropdownItem value="logout">
-            <span class="menu-item-content">
-              <Icon icon="lucide:log-out" :width="14" :height="14" />
-              Logout
-            </span>
-          </DropdownItem>
         </Dropdown>
       </div>
     </div>
@@ -382,7 +376,6 @@ const emit = defineEmits<{
   (event: 'open-shell'): void;
   (event: 'edit-project', payload: { projectId: string; worktree: string }): void;
   (event: 'open-settings'): void;
-  (event: 'logout'): void;
   (event: 'dropdown-closed'): void;
 }>();
 
@@ -412,7 +405,6 @@ defineExpose({ openSessionDropdown, closeSessionDropdown, toggleSessionDropdown 
 
 function onMenuSelect(value: unknown) {
   if (value === 'settings') emit('open-settings');
-  else if (value === 'logout') emit('logout');
 }
 
 const MAX_WORKTREES = Infinity;

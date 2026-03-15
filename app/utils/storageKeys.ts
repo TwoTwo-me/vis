@@ -8,7 +8,6 @@ export const StorageKeys = {
   state: {
     sidePanelCollapsed: 'state.sidePanelCollapsed.v1',
     sidePanelTab: 'state.sidePanelTab.v1',
-    lastAuthError: 'state.lastAuthError.v1',
   },
   drafts: {
     composer: 'drafts.composer.v1',
@@ -16,9 +15,6 @@ export const StorageKeys = {
   },
   favorites: {
     messages: 'favorites.messages.v1',
-  },
-  auth: {
-    credentials: 'auth.credentials.v1',
   },
 } as const;
 
