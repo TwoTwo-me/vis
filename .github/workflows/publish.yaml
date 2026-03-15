@@ -29,5 +29,14 @@ jobs:
       - name: Install dependencies
         run: pnpm -r install --frozen-lockfile
 
+      - name: Lint
+        run: pnpm lint
+
+      - name: Build
+        run: pnpm build
+
+      - name: Managed tests
+        run: pnpm test:managed
+
       - name: Publish
         run: npm publish --access public --tag latest

@@ -1,22 +1,17 @@
-name: Deploy Pages
+name: Verify Managed Runtime
 
 on:
   push:
     branches:
       - main
+  pull_request:
   workflow_dispatch:
 
 permissions:
   contents: read
-  pages: write
-  id-token: write
-
-concurrency:
-  group: pages
-  cancel-in-progress: true
 
 jobs:
-  build:
+  verify:
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
@@ -34,24 +29,11 @@ jobs:
       - name: Install dependencies
         run: pnpm -r install --frozen-lockfile
 
+      - name: Lint
+        run: pnpm lint
+
       - name: Build
-        run: pnpm run build
+        run: pnpm build
 
-      - name: Configure Pages
-        uses: actions/configure-pages@v4
-
-      - name: Upload artifact
-        uses: actions/upload-pages-artifact@v3
-        with:
-          path: dist
-
-  deploy:
-    needs: build
-    runs-on: ubuntu-latest
-    environment:
-      name: github-pages
-      url: ${{ steps.deployment.outputs.page_url }}
-    steps:
-      - name: Deploy to GitHub Pages
-        id: deployment
-        uses: actions/deploy-pages@v4
+      - name: Managed tests
+        run: pnpm test:managed
