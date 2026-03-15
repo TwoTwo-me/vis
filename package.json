@@ -6,7 +6,7 @@
     "opencode",
     "webui"
   ],
-  "homepage": "https://xenodrive.github.io/vis",
+  "homepage": "https://github.com/xenodrive/vis",
   "license": "MIT",
   "author": "Xenodrive, Inc.",
   "repository": {
@@ -26,7 +26,11 @@
     "lint": "oxlint && vue-tsc --noEmit",
     "dev": "vite dev",
     "build": "vite build",
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "serve:managed": "node server.js",
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "test:e2e": "playwright test",
+    "test:managed": "node --test tests/managed/*.test.js",
+    "verify:managed": "pnpm lint && pnpm build && pnpm test:managed"
   },
   "dependencies": {
     "@hono/node-server": "^1.19.9",
@@ -35,6 +39,8 @@
   "devDependencies": {
     "@iconify/vue": "^5.0.0",
     "@kikuchan/hexdump": "0.1.0-alpha.9",
+    "@oxlint/binding-linux-x64-gnu": "^1.55.0",
+    "@playwright/test": "^1.58.2",
     "@shikijs/markdown-it": "^3.22.0",
     "@shikijs/transformers": "^3.22.0",
     "@tailwindcss/postcss": "^4.1.18",
