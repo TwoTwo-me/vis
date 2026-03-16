@@ -267,3 +267,99 @@ test('tree download affordance skips synthetic nodes and surfaces a managed down
     'download failures should surface an explicit browser alert instead of silently failing',
   );
 });
+
+
+test('managed codex usage helper stays on the same-origin /api seam', async () => {
+  const [opencodeSource, topPanelSource, appSource] = await Promise.all([
+    readRepoFile('app/utils/opencode.ts'),
+    readRepoFile('app/components/TopPanel.vue'),
+    readRepoFile('app/App.vue'),
+  ]);
+
+  assert.match(
+    opencodeSource,
+    /createUrl\('\/codex\/usage'\)/,
+    'app/utils/opencode.ts must request the managed codex route through /api/codex/usage',
+  );
+  assert.match(
+    opencodeSource,
+    /if \(response\.status === 404\) return null;/,
+    'app/utils/opencode.ts must soft-disable the feature on 404',
+  );
+  assert.doesNotMatch(
+    topPanelSource,
+    /fetch\(.*codex\/usage/s,
+    'TopPanel.vue must stay prop-driven and never fetch codex usage directly',
+  );
+  assert.doesNotMatch(
+    appSource,
+    /fetch\(.*codex\/usage/s,
+    'App.vue must consume the composable rather than fetching codex usage directly',
+  );
+});
+
+test('managed codex quota polling stays non-blocking and visibility-aware', async () => {
+  const [composableSource, appSource] = await Promise.all([
+    readRepoFile('app/composables/useCodexQuota.ts'),
+    readRepoFile('app/App.vue'),
+  ]);
+
+  assert.match(
+    composableSource,
+    /document\.addEventListener\('visibilitychange', handleVisibilityChange\)/,
+    'useCodexQuota.ts must refresh when the tab becomes visible again',
+  );
+  assert.match(
+    composableSource,
+    /AbortController/,
+    'useCodexQuota.ts must cancel in-flight requests before starting another one',
+  );
+  assert.match(
+    composableSource,
+    /window\.setInterval\(/,
+    'useCodexQuota.ts must poll on a fixed interval',
+  );
+  assert.match(
+    composableSource,
+    /if \(!enabled\.value \|\| disabled\.value \|\| loading\.value\) return;/,
+    'useCodexQuota.ts must stop polling once the route is soft-disabled',
+  );
+  assert.match(
+    appSource,
+    /const codexQuotaEnabled = computed\(\(\) => uiInitState\.value === 'ready'\);/,
+    'App.vue must only enable codex polling after the main UI is ready',
+  );
+});
+
+test('managed top panel renders a prop-driven codex quota chip with stable selectors', async () => {
+  const [topPanelSource, appSource] = await Promise.all([
+    readRepoFile('app/components/TopPanel.vue'),
+    readRepoFile('app/App.vue'),
+  ]);
+
+  assert.match(
+    topPanelSource,
+    /data-testid="codex-quota-chip"/,
+    'TopPanel.vue must expose a stable selector for the codex quota chip',
+  );
+  assert.match(
+    topPanelSource,
+    /data-testid="codex-quota-window-5h"/,
+    'TopPanel.vue must expose a stable selector for the 5h quota segment',
+  );
+  assert.match(
+    topPanelSource,
+    /@media \(max-width: 1100px\)/,
+    'TopPanel.vue must hide the codex chip on narrow layouts',
+  );
+  assert.match(
+    appSource,
+    /:codex-quota="codexQuotaValue"/,
+    'App.vue must pass quota data into TopPanel via props',
+  );
+  assert.match(
+    appSource,
+    /:codex-quota-state="codexQuotaState"/,
+    'App.vue must pass quota UI state into TopPanel via props',
+  );
+});

@@ -1,3 +1,4 @@
+import type { CodexUsageResponse } from '../types/codex-usage';
 type QueryValue = string | number | boolean | undefined;
 
 type JsonBody = Record<string, unknown> | Array<unknown>;
@@ -123,6 +124,16 @@ export function createWsUrl(
 
 export function getManagedBootstrap() {
   return getJson(MANAGED_BOOTSTRAP_PATH) as Promise<unknown>;
+}
+
+export async function getCodexUsage(options?: RequestOptions) {
+  const response = await fetch(createUrl('/codex/usage'), {
+    headers: buildHeaders(options),
+    signal: options?.signal,
+  });
+  if (response.status === 404) return null;
+  if (!response.ok) throw new Error(`/codex/usage request failed (${response.status})`);
+  return (await parseJson(response)) as CodexUsageResponse;
 }
 
 export function getPathInfo(options?: RequestOptions) {
