@@ -108,33 +108,6 @@ function encodeContentDispositionFilename(filename) {
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
 }
 
-async function createTarGzArchiveBuffer(targetPath) {
-  const parentPath = dirname(targetPath);
-  const entryName = basename(targetPath);
-  return new Promise((resolveArchive, rejectArchive) => {
-    const child = spawn('tar', ['-czf', '-', '-C', parentPath, '--', entryName], {
-      stdio: ['ignore', 'pipe', 'pipe'],
-    });
-    const chunks = [];
-    let stderr = '';
-
-    child.stdout.on('data', (chunk) => {
-      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-    });
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString();
-    });
-    child.on('error', rejectArchive);
-    child.on('close', (code) => {
-      if (code === 0) {
-        resolveArchive(Buffer.concat(chunks));
-        return;
-      }
-      rejectArchive(new Error(stderr.trim() || `tar failed (${code ?? 'unknown'})`));
-    });
-  });
-}
-
 function toWebStream(stream) {
   return Readable.toWeb(stream);
 }

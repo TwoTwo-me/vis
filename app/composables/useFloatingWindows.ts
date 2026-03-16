@@ -174,6 +174,7 @@ export function useFloatingWindows() {
 
   async function open(key: string, opts: Partial<FloatingWindowEntry>): Promise<void> {
     const existing = entriesMap.get(key);
+    const existingClosable = existing?.closable;
 
     // Merge with defaults and existing
     const merged: FloatingWindowEntry = {
@@ -184,7 +185,7 @@ export function useFloatingWindows() {
       time: Date.now(),
       zIndex: existing
         ? existing.zIndex
-        : nextZIndex(isManualTier(key, opts.closable ?? existing?.closable)),
+        : nextZIndex(isManualTier(key, opts.closable ?? existingClosable)),
     } as FloatingWindowEntry;
 
     // When updating an existing entry, merge props instead of replacing
