@@ -265,6 +265,46 @@
         </button>
       </div>
       <div class="top-right">
+        <div
+          v-if="props.codexQuotaState !== 'hidden'"
+          class="codex-quota-chip"
+          data-testid="codex-quota-chip"
+        >
+          <span class="codex-quota-label">Codex</span>
+          <template v-if="props.codexQuotaState === 'loading'">
+            <span class="codex-quota-placeholder">...</span>
+          </template>
+          <template v-else-if="props.codexQuotaState === 'error' || props.codexQuota?.state === 'unavailable'">
+            <span class="codex-quota-fallback">unavailable</span>
+          </template>
+          <template v-else-if="props.codexQuota?.state === 'login_required'">
+            <span class="codex-quota-fallback">login</span>
+          </template>
+          <template v-else-if="props.codexQuota">
+            <span
+              class="codex-quota-window"
+              :class="{ 'is-alert': props.codexQuota.windows.fiveHour.alert }"
+              data-testid="codex-quota-window-5h"
+            >
+              {{ props.codexQuota.windows.fiveHour.label }} {{ props.codexQuota.windows.fiveHour.remainingPercent ?? '?' }}% {{ props.codexQuota.windows.fiveHour.remainingText }}
+            </span>
+            <span
+              class="codex-quota-window"
+              :class="{ 'is-alert': props.codexQuota.windows.sevenDay.alert }"
+              data-testid="codex-quota-window-7d"
+            >
+              {{ props.codexQuota.windows.sevenDay.label }} {{ props.codexQuota.windows.sevenDay.remainingPercent ?? '?' }}% {{ props.codexQuota.windows.sevenDay.remainingText }}
+            </span>
+            <span
+              class="codex-quota-window"
+              :class="{ 'is-alert': props.codexQuota.windows.tools30Day.alert }"
+              data-testid="codex-quota-window-30d"
+            >
+              {{ props.codexQuota.windows.tools30Day.label }} {{ props.codexQuota.windows.tools30Day.remainingPercent ?? '?' }}% {{ props.codexQuota.windows.tools30Day.remainingText }}
+            </span>
+            <span v-if="props.codexQuota.stale" class="codex-quota-stale">stale {{ props.codexQuota.staleMinutes }}m</span>
+          </template>
+        </div>
         <a
           href="https://github.com/xenodrive/vis/"
           target="_blank"
@@ -304,6 +344,7 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount, onMounted } from 'vue';
 import { Icon } from '@iconify/vue';
+import type { CodexUsageResponse } from '../types/codex-usage';
 import Dropdown from './Dropdown.vue';
 import DropdownItem from './Dropdown/Item.vue';
 import DropdownSearch from './Dropdown/Search.vue';
@@ -356,6 +397,8 @@ const props = defineProps<{
   activeDirectory: string;
   selectedSessionId: string;
   homePath?: string;
+  codexQuota?: CodexUsageResponse | null;
+  codexQuotaState?: 'hidden' | 'loading' | 'ready' | 'error';
 }>();
 
 const notifications = computed(() => props.notificationSessions ?? []);
@@ -689,6 +732,42 @@ function handleOpenDirectory(close: () => void) {
   flex: 0 0 auto;
   display: flex;
   justify-content: flex-end;
+}
+.top-right {
+  gap: 8px;
+  align-items: center;
+}
+
+.codex-quota-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 32px;
+  padding: 0 10px;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  background: #0b1320;
+  color: #cbd5e1;
+  font-size: 11px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.codex-quota-label {
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.codex-quota-window.is-alert,
+.codex-quota-stale,
+.codex-quota-fallback {
+  color: #fca5a5;
+}
+
+@media (max-width: 1100px) {
+  .codex-quota-chip {
+    display: none;
+  }
 }
 
 .tree-dropdown-root {

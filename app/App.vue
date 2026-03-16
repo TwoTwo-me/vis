@@ -10,6 +10,8 @@
           :active-directory="activeDirectory"
           :selected-session-id="selectedSessionId"
           :home-path="homePath"
+          :codex-quota="codexQuotaValue"
+          :codex-quota-state="codexQuotaState"
           @select-notification="handleNotificationSessionSelect"
           @create-worktree-from="createWorktreeFromWorktree"
           @new-session="createNewSession"
@@ -292,6 +294,7 @@ import { useTodos, type TodoItem } from './composables/useTodos';
 import { useDeltaAccumulator } from './composables/useDeltaAccumulator';
 import { useGlobalEvents } from './composables/useGlobalEvents';
 import { useMessages } from './composables/useMessages';
+import { useCodexQuota } from './composables/useCodexQuota';
 import { useOpenCodeApi } from './composables/useOpenCodeApi';
 import { useReasoningWindows } from './composables/useReasoningWindows';
 import { useServerState } from './composables/useServerState';
@@ -299,6 +302,7 @@ import { useSessionSelection } from './composables/useSessionSelection';
 import { useSubagentWindows } from './composables/useSubagentWindows';
 import { renderWorkerHtml } from './utils/workerRenderer';
 import type { MessagePart, ReasoningPart, ToolPart } from './types/sse';
+import type { CodexUsageResponse } from './types/codex-usage';
 import { resolveProjectColorHex } from './utils/stateBuilder';
 import {
   extractFileRead as extractToolFileRead,
@@ -968,6 +972,17 @@ const retryStatus = ref<{
   next: number;
   attempt: number;
 } | null>(null);
+
+const codexQuotaEnabled = computed(() => uiInitState.value === 'ready');
+const codexQuota = useCodexQuota(codexQuotaEnabled);
+const codexQuotaValue = computed<CodexUsageResponse | null>(() => codexQuota.quota.value);
+const codexQuotaState = computed<'hidden' | 'loading' | 'ready' | 'error'>(() => {
+  if (codexQuota.disabled.value) return 'hidden';
+  if (codexQuota.loading.value && !codexQuota.quota.value) return 'loading';
+  if (codexQuota.error.value && !codexQuota.quota.value) return 'error';
+  if (codexQuota.quota.value) return 'ready';
+  return 'hidden';
+});
 
 const statusText = computed(() => {
   if (connectionState.value === 'reconnecting') {
@@ -2518,16 +2533,21 @@ async function bootstrapSelections() {
   try {
     if (!serverState.bootstrapped.value) {
       await new Promise<void>((resolve, reject) => {
-        const stop = watch([bootstrapReady, initializationFailure], ([ready, failure]) => {
-          if (failure) {
+        let stop = () => {};
+        stop = watch(
+          [bootstrapReady, initializationFailure],
+          ([ready, failure]) => {
+            if (failure) {
+              stop();
+              reject(failure);
+              return;
+            }
+            if (!ready) return;
             stop();
-            reject(failure);
-            return;
-          }
-          if (!ready) return;
-          stop();
-          resolve();
-        }, { immediate: true });
+            resolve();
+          },
+          { immediate: true },
+        );
       });
     }
 
