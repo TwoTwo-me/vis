@@ -233,3 +233,37 @@ test('git directory expansion still hydrates a folder through loadSingleDirector
     'git mode should keep root refresh separate and load expanded directories via listFiles(path)',
   );
 });
+
+test('tree download affordance skips synthetic nodes and surfaces a managed download event', async () => {
+  const [treeViewSource, sidePanelSource, appSource] = await Promise.all([
+    readRepoFile('app/components/TreeView.vue'),
+    readRepoFile('app/components/SidePanel.vue'),
+    readRepoFile('app/App.vue'),
+  ]);
+
+  assert.match(
+    treeViewSource,
+    /function canDownloadNode\(node: TreeNode\) \{\s*if \(node\.synthetic\) return false;/,
+    'tree download action should skip synthetic nodes that are not backed by a real file-system target',
+  );
+  assert.match(
+    treeViewSource,
+    /emit\('download', \{ path: node\.path, isDirectory: node\.type === 'directory' \}\);/,
+    'tree rows should emit a dedicated download event with path and directory metadata',
+  );
+  assert.match(
+    sidePanelSource,
+    /@download="\(payload\) => emit\('download', payload\)"/,
+    'side panel should forward tree download events to the app shell',
+  );
+  assert.match(
+    appSource,
+    /@download="downloadTreePath"/,
+    'app shell should consume tree download events',
+  );
+  assert.match(
+    appSource,
+    /window\.alert\(message\)|window\.alert\(payload\.isDirectory \? 'Directory download failed\.' : 'File download failed\.'\);/,
+    'download failures should surface an explicit browser alert instead of silently failing',
+  );
+});

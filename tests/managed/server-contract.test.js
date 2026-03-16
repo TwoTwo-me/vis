@@ -1,10 +1,11 @@
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
+import { gunzipSync } from 'node:zlib';
 import {
   connectWebSocketOnce,
   managedBootstrap,
@@ -288,6 +289,121 @@ test('GET /api/file/content/pdf rejects unknown roots and invalid paths', async 
 
     const invalidRoot = await fetch(
       `${localVis.origin}/api/file/content/pdf?directory=${encodeURIComponent('/')}&path=${encodeURIComponent(join(outsideRoot, 'secret.pdf'))}`,
+    );
+    assert.equal(invalidRoot.status, 400);
+    assert.deepEqual(await invalidRoot.json(), { error: 'Invalid path' });
+  } finally {
+    await Promise.allSettled([
+      localVis.stop(),
+      upstreamStub.stop(),
+      rm(workspace, { recursive: true, force: true }),
+      rm(outsideRoot, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test('GET /api/file/download serves files and archives directories under known project roots', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-file-download-'));
+  const nestedDir = join(workspace, 'fixtures');
+  const textPath = join(workspace, 'fixture.txt');
+  const nestedPath = join(nestedDir, 'nested.txt');
+  const upstreamStub = await startProjectRootStub(workspace);
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstreamStub.origin,
+    VIS_EDGE_AUTH_MODE: 'edge',
+  });
+  await mkdir(nestedDir, { recursive: true });
+  await writeFile(textPath, 'plain fixture\n');
+  await writeFile(nestedPath, 'nested fixture\n');
+
+  try {
+    const fileResponse = await fetch(
+      `${localVis.origin}/api/file/download?directory=${encodeURIComponent(workspace)}&path=fixture.txt`,
+    );
+    assert.equal(fileResponse.status, 200, 'expected file download endpoint to return file bytes');
+    assert.equal(fileResponse.headers.get('content-type'), 'text/plain');
+    assert.match(fileResponse.headers.get('content-disposition') ?? '', /attachment; .*fixture\.txt/);
+    assert.equal(await fileResponse.text(), 'plain fixture\n');
+
+    const dirResponse = await fetch(
+      `${localVis.origin}/api/file/download?directory=${encodeURIComponent(workspace)}&path=fixtures`,
+    );
+    assert.equal(dirResponse.status, 200, 'expected directory download endpoint to return archive bytes');
+    assert.equal(dirResponse.headers.get('content-type'), 'application/gzip');
+    assert.match(dirResponse.headers.get('content-disposition') ?? '', /fixtures\.tar\.gz/);
+    const archiveBuffer = Buffer.from(await dirResponse.arrayBuffer());
+    const tarBuffer = gunzipSync(archiveBuffer);
+    assert.equal(archiveBuffer[0], 0x1f, 'expected gzip magic byte 1');
+    assert.equal(archiveBuffer[1], 0x8b, 'expected gzip magic byte 2');
+    assert.equal(tarBuffer.includes(Buffer.from('fixtures/nested.txt')), true);
+  } finally {
+    await Promise.allSettled([
+      localVis.stop(),
+      upstreamStub.stop(),
+      rm(workspace, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test('GET /api/file/download archives directories whose names begin with a dash', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-file-download-dash-'));
+  const dashDir = join(workspace, '-fixtures');
+  const upstreamStub = await startProjectRootStub(workspace);
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstreamStub.origin,
+    VIS_EDGE_AUTH_MODE: 'edge',
+  });
+  await mkdir(dashDir, { recursive: true });
+  await writeFile(join(dashDir, 'nested.txt'), 'nested fixture\n');
+
+  try {
+    const response = await fetch(
+      `${localVis.origin}/api/file/download?directory=${encodeURIComponent(workspace)}&path=${encodeURIComponent('-fixtures')}`,
+    );
+    assert.equal(response.status, 200, 'expected leading-dash directory download to succeed');
+    assert.equal(response.headers.get('content-type'), 'application/gzip');
+    assert.match(response.headers.get('content-disposition') ?? '', /-fixtures\.tar\.gz/);
+    const archiveBuffer = Buffer.from(await response.arrayBuffer());
+    const tarBuffer = gunzipSync(archiveBuffer);
+    assert.equal(tarBuffer.includes(Buffer.from('-fixtures/nested.txt')), true);
+  } finally {
+    await Promise.allSettled([
+      localVis.stop(),
+      upstreamStub.stop(),
+      rm(workspace, { recursive: true, force: true }),
+    ]);
+  }
+});
+
+test('GET /api/file/download rejects unknown roots and invalid paths', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-file-download-error-'));
+  const outsideRoot = await mkdtemp(join(tmpdir(), 'vis-file-download-outside-'));
+  const upstreamStub = await startProjectRootStub(workspace);
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstreamStub.origin,
+    VIS_EDGE_AUTH_MODE: 'edge',
+  });
+  await writeFile(join(workspace, 'fixture.txt'), 'inside\n');
+  await writeFile(join(outsideRoot, 'secret.txt'), 'outside\n');
+
+  try {
+    const missing = await fetch(
+      `${localVis.origin}/api/file/download?directory=${encodeURIComponent(workspace)}&path=missing.txt`,
+    );
+    assert.equal(missing.status, 404);
+    assert.deepEqual(await missing.json(), { error: 'File read failed' });
+
+    const invalidTraversal = await fetch(
+      `${localVis.origin}/api/file/download?directory=${encodeURIComponent(workspace)}&path=${encodeURIComponent(join(outsideRoot, 'secret.txt'))}`,
+    );
+    assert.equal(invalidTraversal.status, 400);
+    assert.deepEqual(await invalidTraversal.json(), { error: 'Invalid path' });
+
+    const invalidRoot = await fetch(
+      `${localVis.origin}/api/file/download?directory=${encodeURIComponent('/')}&path=${encodeURIComponent(join(outsideRoot, 'secret.txt'))}`,
     );
     assert.equal(invalidRoot.status, 400);
     assert.deepEqual(await invalidRoot.json(), { error: 'Invalid path' });
