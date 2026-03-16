@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
 import { once } from 'node:events';
-import { readFile } from 'node:fs/promises';
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises';
 import { createServer, request as httpRequest } from 'node:http';
 import assert from 'node:assert/strict';
 import { dirname, resolve } from 'node:path';
@@ -11,6 +11,25 @@ import { fileURLToPath } from 'node:url';
 const __dirname = dirname(fileURLToPath(import.meta.url));
 
 export const repoRoot = resolve(__dirname, '..', '..');
+const managedProjectId = 'proj-managed';
+const managedSessionId = 'ses-managed-root';
+const managedDirectory = repoRoot;
+export const managedHarnessVisPort = 30001;
+export const managedHarnessRequestLogPath = resolve(
+  repoRoot,
+  'test-results',
+  'managed-mention-requests.json',
+);
+export const managedHarnessStatePath = resolve(
+  repoRoot,
+  'test-results',
+  '.managed-playwright-harness.json',
+);
+export const managedHarnessLogPath = resolve(
+  repoRoot,
+  'test-results',
+  '.managed-playwright-harness.log',
+);
 export const managedBootstrap = Object.freeze({
   mode: 'managed',
   auth: 'edge',
@@ -29,6 +48,85 @@ export async function readRepoFile(relativePath) {
   return readFile(resolve(repoRoot, relativePath), 'utf8');
 }
 
+async function closeServer(server) {
+  await new Promise((resolveClose, rejectClose) => {
+    server.close((error) => {
+      if (error) rejectClose(error);
+      else resolveClose();
+    });
+  });
+}
+
+async function writeJsonFile(filePath, value) {
+  await mkdir(dirname(filePath), { recursive: true });
+  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8');
+}
+
+async function isPortAvailable(port) {
+  const server = createServer();
+
+  try {
+    await new Promise((resolveListen, rejectListen) => {
+      server.once('error', rejectListen);
+      server.listen(port, '127.0.0.1', resolveListen);
+    });
+    return true;
+  } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'EADDRINUSE') {
+      return false;
+    }
+    throw error;
+  } finally {
+    if (server.listening) {
+      await closeServer(server);
+    }
+  }
+}
+
+async function resolvePort(preferredPort) {
+  if (preferredPort === undefined) return getFreePort();
+
+  if (!Number.isInteger(preferredPort) || preferredPort <= 0) {
+    throw new Error(`invalid preferred port: ${preferredPort}`);
+  }
+
+  if (!(await isPortAvailable(preferredPort))) {
+    throw new Error(`vis server port ${preferredPort} is already in use`);
+  }
+
+  return preferredPort;
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalProcessGroup(pid, signal) {
+  try {
+    process.kill(-pid, signal);
+    return true;
+  } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'ESRCH') {
+      return false;
+    }
+    throw error;
+  }
+}
+
+async function waitForProcessExit(pid, timeoutMs = 5000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (!isProcessAlive(pid)) return true;
+    await delay(100);
+  }
+  return !isProcessAlive(pid);
+}
+
 async function getFreePort() {
   const server = createServer();
   server.listen(0, '127.0.0.1');
@@ -36,12 +134,7 @@ async function getFreePort() {
   const address = server.address();
   assert(address && typeof address === 'object', 'expected TCP server address');
   const { port } = address;
-  await new Promise((resolveClose, rejectClose) => {
-    server.close((error) => {
-      if (error) rejectClose(error);
-      else resolveClose();
-    });
-  });
+  await closeServer(server);
   return port;
 }
 
@@ -96,9 +189,13 @@ async function readRequestBody(req) {
   return raw;
 }
 
-export async function startUpstreamStub() {
+export async function startUpstreamStub(options = {}) {
   const requests = [];
   const upgrades = [];
+  const ptyResponses = new Map();
+  let ptyCounter = 0;
+  const requestLogPath = options.requestLogPath;
+  const scenario = options.scenario ?? 'default';
   const port = await getFreePort();
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
@@ -110,17 +207,275 @@ export async function startUpstreamStub() {
       headers: { ...req.headers },
       body,
     });
+    if (requestLogPath) {
+      await writeJsonFile(requestLogPath, requests);
+    }
 
     if (url.pathname === '/project') {
       res.writeHead(200, { 'content-type': 'application/json' });
+      if (scenario === 'playwright-managed') {
+        res.end(
+          JSON.stringify([
+            {
+              id: managedProjectId,
+              name: 'Managed Harness Project',
+              worktree: managedDirectory,
+              sandboxes: [managedDirectory],
+            },
+          ]),
+        );
+      } else {
+        res.end(
+          JSON.stringify({
+            ok: true,
+            pathname: url.pathname,
+            directory: url.searchParams.get('directory'),
+            authorization: req.headers.authorization ?? null,
+          }),
+        );
+      }
+      return;
+    }
+
+    if (url.pathname === '/path') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (scenario === 'playwright-managed') {
+        res.end(
+          JSON.stringify({
+            home: '/root',
+            worktree: managedDirectory,
+          }),
+        );
+      } else {
+        res.end(
+          JSON.stringify({
+            ok: true,
+            method: req.method ?? 'GET',
+            pathname: url.pathname,
+            searchParams: Object.fromEntries(url.searchParams.entries()),
+            authorization: req.headers.authorization ?? null,
+            directoryHeader: req.headers['x-opencode-directory'] ?? null,
+            workspaceHeader: req.headers['x-opencode-workspace'] ?? null,
+            body,
+          }),
+        );
+      }
+      return;
+    }
+
+    if (url.pathname === '/vcs') {
+      res.writeHead(200, { 'content-type': 'application/json' });
       res.end(
-        JSON.stringify({
-          ok: true,
-          pathname: url.pathname,
-          directory: url.searchParams.get('directory'),
-          authorization: req.headers.authorization ?? null,
-        }),
+        scenario === 'playwright-managed'
+          ? JSON.stringify({ branch: 'main' })
+          : JSON.stringify({
+              ok: true,
+              pathname: url.pathname,
+              directory: url.searchParams.get('directory'),
+              authorization: req.headers.authorization ?? null,
+            }),
       );
+      return;
+    }
+
+    if (url.pathname === '/agent') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        scenario === 'playwright-managed'
+          ? JSON.stringify([
+              {
+                name: 'build',
+                mode: 'primary',
+                description: 'Build agent',
+                color: '#22c55e',
+              },
+              {
+                name: 'plan',
+                mode: 'primary',
+                description: 'Plan agent',
+                color: '#f59e0b',
+              },
+            ])
+          : JSON.stringify({
+              ok: true,
+              pathname: url.pathname,
+              directory: url.searchParams.get('directory'),
+              authorization: req.headers.authorization ?? null,
+            }),
+      );
+      return;
+    }
+
+    if (url.pathname === '/command') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        scenario === 'playwright-managed'
+          ? JSON.stringify([
+              {
+                name: 'debug',
+                description: 'Managed harness debug command',
+              },
+            ])
+          : JSON.stringify({
+              ok: true,
+              method: req.method ?? 'GET',
+              pathname: url.pathname,
+              searchParams: Object.fromEntries(url.searchParams.entries()),
+              authorization: req.headers.authorization ?? null,
+              directoryHeader: req.headers['x-opencode-directory'] ?? null,
+              workspaceHeader: req.headers['x-opencode-workspace'] ?? null,
+              body,
+            }),
+      );
+      return;
+    }
+
+    if (url.pathname === '/config/providers') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        scenario === 'playwright-managed'
+          ? JSON.stringify({ providers: [] })
+          : JSON.stringify({
+              ok: true,
+              pathname: url.pathname,
+              directory: url.searchParams.get('directory'),
+              authorization: req.headers.authorization ?? null,
+            }),
+      );
+      return;
+    }
+
+    if (url.pathname === '/session' && req.method === 'GET') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (scenario === 'playwright-managed') {
+        res.end(
+          JSON.stringify([
+            {
+              id: managedSessionId,
+              projectID: managedProjectId,
+              title: 'Managed Harness Session',
+              directory: managedDirectory,
+              timeCreated: Date.now(),
+              timeUpdated: Date.now(),
+            },
+          ]),
+        );
+      } else {
+        res.end(
+          JSON.stringify({
+            ok: true,
+            method: req.method ?? 'GET',
+            pathname: url.pathname,
+            searchParams: Object.fromEntries(url.searchParams.entries()),
+            authorization: req.headers.authorization ?? null,
+            directoryHeader: req.headers['x-opencode-directory'] ?? null,
+            workspaceHeader: req.headers['x-opencode-workspace'] ?? null,
+            body,
+          }),
+        );
+      }
+      return;
+    }
+
+    if (url.pathname === '/session' && req.method === 'POST') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      if (scenario === 'playwright-managed') {
+        res.end(
+          JSON.stringify({
+            id: managedSessionId,
+            projectID: managedProjectId,
+            title: 'Managed Harness Session',
+            directory: managedDirectory,
+            timeCreated: Date.now(),
+            timeUpdated: Date.now(),
+          }),
+        );
+      } else {
+        res.end(
+          JSON.stringify({
+            ok: true,
+            method: req.method ?? 'GET',
+            pathname: url.pathname,
+            searchParams: Object.fromEntries(url.searchParams.entries()),
+            authorization: req.headers.authorization ?? null,
+            directoryHeader: req.headers['x-opencode-directory'] ?? null,
+            workspaceHeader: req.headers['x-opencode-workspace'] ?? null,
+            body,
+          }),
+        );
+      }
+      return;
+    }
+
+    if (url.pathname === '/session/status') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(
+        scenario === 'playwright-managed'
+          ? JSON.stringify({ [managedSessionId]: { type: 'idle' } })
+          : JSON.stringify({
+              ok: true,
+              method: req.method ?? 'GET',
+              pathname: url.pathname,
+              searchParams: Object.fromEntries(url.searchParams.entries()),
+              authorization: req.headers.authorization ?? null,
+              directoryHeader: req.headers['x-opencode-directory'] ?? null,
+              workspaceHeader: req.headers['x-opencode-workspace'] ?? null,
+              body,
+            }),
+      );
+      return;
+    }
+
+    if (url.pathname === '/pty' && req.method === 'POST') {
+      if (scenario !== 'playwright-managed') {
+        res.writeHead(200, { 'content-type': 'application/json' });
+        res.end(
+          JSON.stringify({
+            ok: true,
+            method: req.method ?? 'GET',
+            pathname: url.pathname,
+            searchParams: Object.fromEntries(url.searchParams.entries()),
+            authorization: req.headers.authorization ?? null,
+            directoryHeader: req.headers['x-opencode-directory'] ?? null,
+            workspaceHeader: req.headers['x-opencode-workspace'] ?? null,
+            body,
+          }),
+        );
+        return;
+      }
+      const ptyId = `pty-${++ptyCounter}`;
+      const bodyArgs = Array.isArray(body?.args) ? body.args.map((item) => String(item)) : [];
+      const joinedArgs = bodyArgs.join(' ');
+      let output = '\n__OPENCODE_PTY_EXIT_CODE__:0\n';
+      if (joinedArgs.includes('git ls-files --cached --others --exclude-standard -z')) {
+        output = `app/App.vue\0app/views/App.vue\0app/components/InputPanel.vue\0README.md\0\n__OPENCODE_PTY_EXIT_CODE__:0\n`;
+      } else if (joinedArgs.includes('git -c color.status=false -c color.ui=false --no-pager status --porcelain=v1 -z -b')) {
+        output = `## main\0\0##HEAD\0a68b6e8\0##DIFFSTAT\0\0##DIFFSTAT_CACHED\0\n__OPENCODE_PTY_EXIT_CODE__:0\n`;
+      }
+      ptyResponses.set(ptyId, output);
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ id: ptyId }));
+      return;
+    }
+
+    if (url.pathname === '/file') {
+      const requestedPath = url.searchParams.get('path') || '.';
+      const entries =
+        requestedPath === '.'
+          ? [
+              { path: `${managedDirectory}/app`, type: 'directory' },
+              { path: `${managedDirectory}/README.md`, type: 'file' },
+            ]
+          : requestedPath === 'app'
+            ? [
+                { path: `${managedDirectory}/app/App.vue`, type: 'file' },
+                { path: `${managedDirectory}/app/components`, type: 'directory' },
+              ]
+            : requestedPath === 'app/components'
+              ? [{ path: `${managedDirectory}/app/components/InputPanel.vue`, type: 'file' }]
+              : [];
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(entries));
       return;
     }
 
@@ -133,7 +488,6 @@ export async function startUpstreamStub() {
       res.write(
         'data: {"directory":"global","payload":{"type":"server.connected","properties":{}}}\n\n',
       );
-      setTimeout(() => res.end(), 25);
       return;
     }
 
@@ -183,7 +537,7 @@ export async function startUpstreamStub() {
     void readWebSocketTextFrame(socket, head, { expectMasked: true })
       .then((message) => {
         upgradeInfo.clientMessage = message;
-        socket.write(encodeTextFrame(`pty:${match[1]}:${message}`));
+        socket.write(encodeTextFrame(ptyResponses.get(match[1]) ?? `pty:${match[1]}:${message}`));
         setTimeout(() => socket.end(), 25);
       })
       .catch(() => {
@@ -199,12 +553,7 @@ export async function startUpstreamStub() {
     requests,
     upgrades,
     async stop() {
-      await new Promise((resolveClose, rejectClose) => {
-        server.close((error) => {
-          if (error) rejectClose(error);
-          else resolveClose();
-        });
-      });
+      await closeServer(server);
     },
   };
 }
@@ -240,8 +589,8 @@ async function waitForListening(child, port) {
   await started;
 }
 
-export async function startVisServer(env = {}) {
-  const port = await getFreePort();
+export async function startVisServer(env = {}, options = {}) {
+  const port = await resolvePort(options.port);
   const child = spawn(process.execPath, ['server.js'], {
     cwd: repoRoot,
     env: {
@@ -268,8 +617,8 @@ export async function startVisServer(env = {}) {
   };
 }
 
-export async function startVisServerExpectingFailure(env = {}) {
-  const port = await getFreePort();
+export async function startVisServerExpectingFailure(env = {}, options = {}) {
+  const port = await resolvePort(options.port);
   const child = spawn(process.execPath, ['server.js'], {
     cwd: repoRoot,
     env: {
@@ -323,6 +672,80 @@ export async function startVisServerExpectingFailure(env = {}) {
     stdout,
     stderr,
   };
+}
+
+export async function startManagedPlaywrightHarness(options = {}) {
+  const visPort = options.visPort ?? managedHarnessVisPort;
+  const requestLogPath = options.requestLogPath ?? managedHarnessRequestLogPath;
+  const upstream = await startUpstreamStub({ requestLogPath, scenario: 'playwright-managed' });
+  let vis;
+  let stopped = false;
+
+  try {
+    vis = await startVisServer(
+      {
+        VIS_MODE: 'managed',
+        VIS_UPSTREAM_URL: upstream.origin,
+        VIS_EDGE_AUTH_MODE: 'edge',
+      },
+      { port: visPort },
+    );
+  } catch (error) {
+    await upstream.stop();
+    throw error;
+  }
+
+  return {
+    origin: vis.origin,
+    upstreamOrigin: upstream.origin,
+    requestLogPath,
+    requests: upstream.requests,
+    async stop() {
+      if (stopped) return;
+      stopped = true;
+      await writeJsonFile(requestLogPath, upstream.requests);
+      await Promise.allSettled([vis.stop(), upstream.stop()]);
+    },
+  };
+}
+
+export async function stopManagedHarnessFromState() {
+  let rawState;
+
+  try {
+    rawState = await readFile(managedHarnessStatePath, 'utf8');
+  } catch (error) {
+    if (error && typeof error === 'object' && error.code === 'ENOENT') {
+      return false;
+    }
+    throw error;
+  }
+
+  let pid;
+  try {
+    pid = JSON.parse(rawState).pid;
+  } catch {
+    await rm(managedHarnessStatePath, { force: true });
+    return false;
+  }
+
+  if (!Number.isInteger(pid) || pid <= 0) {
+    await rm(managedHarnessStatePath, { force: true });
+    return false;
+  }
+
+  if (!signalProcessGroup(pid, 'SIGTERM')) {
+    await rm(managedHarnessStatePath, { force: true });
+    return false;
+  }
+
+  if (!(await waitForProcessExit(pid))) {
+    signalProcessGroup(pid, 'SIGKILL');
+    await waitForProcessExit(pid, 2000);
+  }
+
+  await rm(managedHarnessStatePath, { force: true });
+  return true;
 }
 
 export async function readSseFrame(response) {
@@ -475,5 +898,60 @@ function readWebSocketTextFrame(socket, initialData, options = {}) {
     if (tryResolve()) {
       cleanup();
     }
+  });
+}
+
+async function runManagedPlaywrightHarnessProcess() {
+  await mkdir(dirname(managedHarnessStatePath), { recursive: true });
+  await rm(managedHarnessStatePath, { force: true });
+  const harness = await startManagedPlaywrightHarness();
+  let shuttingDown = false;
+
+  const shutdown = async (exitCode, error) => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+
+    if (error) {
+      console.error(error);
+    }
+
+    try {
+      await harness.stop();
+    } finally {
+      await rm(managedHarnessStatePath, { force: true });
+    }
+
+    process.exit(exitCode);
+  };
+
+  process.on('SIGINT', () => {
+    void shutdown(130);
+  });
+  process.on('SIGTERM', () => {
+    void shutdown(0);
+  });
+  process.on('uncaughtException', (error) => {
+    void shutdown(1, error);
+  });
+  process.on('unhandledRejection', (error) => {
+    void shutdown(1, error);
+  });
+
+  await writeJsonFile(managedHarnessStatePath, {
+    pid: process.pid,
+    origin: harness.origin,
+    upstreamOrigin: harness.upstreamOrigin,
+    requestLogPath: harness.requestLogPath,
+    visPort: managedHarnessVisPort,
+  });
+}
+
+const isCliEntrypoint =
+  process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url);
+
+if (isCliEntrypoint && process.argv[2] === 'playwright-managed-harness') {
+  runManagedPlaywrightHarnessProcess().catch((error) => {
+    console.error(error);
+    process.exit(1);
   });
 }
