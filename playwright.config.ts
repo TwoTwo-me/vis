@@ -1,9 +1,12 @@
 import { defineConfig } from '@playwright/test';
+import { managedHarnessVisPort } from './tests/managed/testHarness.js';
 
-const baseURL = process.env.PLAYWRIGHT_BASE_URL || 'http://127.0.0.1:4444';
+const baseURL = process.env.PLAYWRIGHT_BASE_URL || `http://127.0.0.1:${managedHarnessVisPort}`;
 
 export default defineConfig({
   testDir: './tests/e2e',
+  globalSetup: './tests/e2e/global.setup.ts',
+  globalTeardown: './tests/e2e/global.teardown.ts',
   timeout: 30000,
   fullyParallel: false,
   workers: 1,
