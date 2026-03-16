@@ -136,6 +136,8 @@
               :can-abort="canAbort"
               :commands="commandOptions"
               :attachments="attachments"
+              :file-candidates="files"
+              :file-candidates-version="fileCacheVersion"
               :message-input="messageInput"
               :selected-mode="selectedMode"
               :selected-model="selectedModel"
@@ -1145,6 +1147,8 @@ const {
   treeError,
   gitStatus,
   gitStatusByPath,
+  files,
+  fileCacheVersion,
   refreshGitStatus,
   reloadTree,
   toggleTreeDirectory,
@@ -3189,7 +3193,9 @@ function handleFloatingWindowClose(key: string) {
 
 function disposeShellWindows() {
   const ids = Array.from(shellSessionsByPtyId.keys());
-  ids.forEach((ptyId) => removeShellWindow(ptyId));
+  ids.forEach((ptyId) => {
+    removeShellWindow(ptyId);
+  });
 }
 
 let shellDirectory = '';

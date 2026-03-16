@@ -101,10 +101,13 @@
         :disabled="false"
         placeholder="Send a message..."
         @keydown="handleKeydown"
+        @click="syncTextareaSelection"
         @paste="handlePaste"
+        @keyup="syncTextareaSelection"
         @drop="handleDrop"
         @dragover.prevent
         @dragenter.prevent
+        @select="syncTextareaSelection"
       ></textarea>
       <input
         ref="fileInputRef"
@@ -145,6 +148,55 @@
         </div>
       </div>
       <div class="command-dropdown-wrapper">
+        <Dropdown
+          ref="mentionDropdownRef"
+          :open="mentionPopupOpen"
+          :auto-close="false"
+          :auto-focus="false"
+          :auto-highlight="true"
+          popup-class="input-dropdown-popup mention-popup"
+          @select="handleMentionSelect"
+        >
+          <template #trigger><span /></template>
+          <template #default>
+            <div class="dropdown-list" data-testid="composer-mention-popup">
+              <template v-if="!mentionFileOnlyMode">
+                <DropdownLabel data-testid="composer-mention-group-agents">Agents</DropdownLabel>
+                <DropdownItem
+                  v-for="option in mentionAgentOptions"
+                  :key="option.key"
+                  :value="option.key"
+                >
+                  <div class="mention-dropdown-item" :data-testid="option.testId" :id="option.testId">
+                    <div class="mention-dropdown-primary">@{{ option.value }}</div>
+                    <div v-if="option.description" class="mention-dropdown-secondary">
+                      {{ option.description }}
+                    </div>
+                  </div>
+                </DropdownItem>
+              </template>
+              <template v-if="activeMention">
+                <DropdownLabel data-testid="composer-mention-group-files">Files</DropdownLabel>
+                <DropdownItem
+                  v-for="option in mentionFileOptions"
+                  :key="option.key"
+                  :value="option.key"
+                >
+                  <div class="mention-dropdown-item" :data-testid="option.testId" :id="option.testId">
+                    <div class="mention-dropdown-primary">@{{ option.value }}</div>
+                  </div>
+                </DropdownItem>
+              </template>
+              <div
+                v-if="mentionOptions.length === 0"
+                class="dropdown-empty"
+                data-testid="composer-mention-empty"
+              >
+                No matching agents or files
+              </div>
+            </div>
+          </template>
+        </Dropdown>
         <Dropdown
           ref="commandDropdownRef"
           :open="commandPopupOpen"
@@ -378,6 +430,13 @@ import DropdownSearch from './Dropdown/Search.vue';
 import { useMessages } from '../composables/useMessages';
 import { useFavoriteMessages } from '../composables/useFavoriteMessages';
 import { useSettings } from '../composables/useSettings';
+import {
+  buildMentionReplacement,
+  extractActiveMention,
+  rankAgentMentionCandidates,
+  rankFileMentionCandidates,
+  shouldUseFileOnlyMode,
+} from '../utils/composerMentions';
 type ModelOption = {
   id: string;
   modelID: string;
@@ -407,6 +466,8 @@ const props = defineProps<{
   canAbort: boolean;
   commands: CommandOption[];
   attachments: Array<{ id: string; filename: string; mime: string; dataUrl: string }>;
+  fileCandidates: string[];
+  fileCandidatesVersion: number;
   agentColor?: string;
   resolveAgentColor?: (agent?: string) => string;
   disabled?: boolean;
@@ -460,6 +521,9 @@ type DropdownRef = {
 const historyDropdownRef = ref<DropdownRef | null>(null);
 const favoritesDropdownRef = ref<DropdownRef | null>(null);
 const commandDropdownRef = ref<DropdownRef | null>(null);
+const mentionDropdownRef = ref<DropdownRef | null>(null);
+const textareaSelection = ref(0);
+const mentionPopupDismissed = ref(false);
 
 type HistoryEntry = {
   text: string;
@@ -631,6 +695,81 @@ const slashQuery = computed(() => {
   return match?.[1] ?? '';
 });
 
+function syncTextareaSelection() {
+  const textarea = textareaRef.value;
+  if (!textarea) {
+    textareaSelection.value = messageValue.value.length;
+    return;
+  }
+  textareaSelection.value = textarea.selectionStart ?? messageValue.value.length;
+}
+
+const mentionFileCandidates = computed(() => {
+  void props.fileCandidatesVersion;
+  return props.fileCandidates ?? [];
+});
+
+const activeMention = computed(() =>
+  extractActiveMention(messageValue.value, textareaSelection.value),
+);
+
+type MentionOption = {
+  key: string;
+  kind: 'agent' | 'file';
+  value: string;
+  description?: string;
+  testId: string;
+};
+
+function toMentionTestId(kind: 'agent' | 'file', value: string) {
+  return `composer-mention-option-${kind}-${value.replace(/[^a-zA-Z0-9]+/g, '-')}`;
+}
+
+const mentionAgentOptions = computed<MentionOption[]>(() => {
+  const mention = activeMention.value;
+  if (!mention || shouldUseFileOnlyMode(mention.query)) return [];
+  return rankAgentMentionCandidates(props.agentOptions ?? [], mention.query).map((value) => {
+    const option = props.agentOptions.find((item) => item.id === value);
+    return {
+      key: `agent:${value}`,
+      kind: 'agent',
+      value,
+      description: option?.description,
+      testId: toMentionTestId('agent', value),
+    };
+  });
+});
+
+const mentionFileOptions = computed<MentionOption[]>(() => {
+  const mention = activeMention.value;
+  if (!mention) return [];
+  const limit = mentionFileOnlyMode.value ? 10 : Math.max(0, 10 - mentionAgentOptions.value.length);
+  return rankFileMentionCandidates(mentionFileCandidates.value, mention.query)
+    .slice(0, limit)
+    .map((value) => ({
+    key: `file:${value}`,
+    kind: 'file',
+    value,
+    testId: toMentionTestId('file', value),
+    }));
+});
+
+const mentionOptions = computed(() => [...mentionAgentOptions.value, ...mentionFileOptions.value]);
+
+const mentionFileOnlyMode = computed(() => {
+  const mention = activeMention.value;
+  return mention ? shouldUseFileOnlyMode(mention.query) : false;
+});
+
+const mentionOptionByKey = computed(
+  () => new Map(mentionOptions.value.map((option) => [option.key, option])),
+);
+
+const mentionPopupOpen = computed(() => {
+  if (mentionPopupDismissed.value) return false;
+  return Boolean(activeMention.value);
+});
+
 const commandMatches = computed(() => {
   if (!messageValue.value.startsWith('/')) return [];
   if (/\s/.test(messageValue.value.slice(1))) return [];
@@ -650,8 +789,38 @@ watch(
   () => messageValue.value,
   () => {
     commandPopupDismissed.value = false;
+    mentionPopupDismissed.value = false;
+    nextTick(() => {
+      syncTextareaSelection();
+    });
   },
 );
+
+function applyMentionSelection(option: MentionOption) {
+  const mention = activeMention.value;
+  if (!mention) return;
+  const replacement = buildMentionReplacement(option.kind, option.value);
+  const nextValue =
+    `${messageValue.value.slice(0, mention.start)}${replacement}` +
+    messageValue.value.slice(mention.end);
+  const nextSelection = mention.start + replacement.length;
+  messageValue.value = nextValue;
+  mentionPopupDismissed.value = true;
+  nextTick(() => {
+    const textarea = textareaRef.value;
+    if (!textarea) return;
+    textarea.focus();
+    textarea.setSelectionRange(nextSelection, nextSelection);
+    syncTextareaSelection();
+  });
+}
+
+function handleMentionSelect(value: unknown) {
+  if (typeof value !== 'string') return;
+  const option = mentionOptionByKey.value.get(value);
+  if (!option) return;
+  applyMentionSelection(option);
+}
 
 function handleCommandSelect(name: unknown) {
   if (typeof name === 'string') applyCommandSelection(name);
@@ -736,6 +905,44 @@ function handleModelDropdownOpenChange(open: boolean) {
 }
 
 function handleKeydown(event: KeyboardEvent) {
+  if (mentionPopupOpen.value) {
+    if (event.key === 'Escape') {
+      event.preventDefault();
+      mentionPopupDismissed.value = true;
+      return;
+    }
+    if (event.key === 'ArrowDown') {
+      event.preventDefault();
+      mentionDropdownRef.value?.moveHighlight('down');
+      return;
+    }
+    if (event.key === 'ArrowUp') {
+      event.preventDefault();
+      mentionDropdownRef.value?.moveHighlight('up');
+      return;
+    }
+    if (
+      event.key === 'Tab' &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+      mentionDropdownRef.value?.selectHighlighted();
+      return;
+    }
+    if (
+      event.key === 'Enter' &&
+      !event.ctrlKey &&
+      !event.metaKey &&
+      !event.shiftKey &&
+      !event.altKey
+    ) {
+      event.preventDefault();
+      mentionDropdownRef.value?.selectHighlighted();
+      return;
+    }
+  }
   if (commandPopupOpen.value) {
     if (event.key === 'Escape') {
       event.preventDefault();
@@ -1165,6 +1372,32 @@ const inputMessageStyle = computed(() => {
   gap: 2px;
   width: 100%;
   min-width: 0;
+}
+
+.mention-dropdown-item {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  min-width: 0;
+}
+
+.mention-dropdown-primary {
+  font-size: 12px;
+  color: #e2e8f0;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.mention-dropdown-secondary {
+  font-size: 10px;
+  color: #94a3b8;
+  line-height: 1.2;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .agent-dropdown-name {
