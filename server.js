@@ -2,10 +2,13 @@
 import { createAdaptorServer } from '@hono/node-server';
 import { serveStatic } from '@hono/node-server/serve-static';
 import { Hono } from 'hono';
+import { spawn } from 'node:child_process';
+import { createReadStream } from 'node:fs';
 import { request as requestHTTP } from 'node:http';
 import { request as requestHTTPS } from 'node:https';
-import { readFile, realpath } from 'node:fs/promises';
-import { extname, join, relative, resolve } from 'node:path';
+import { readFile, realpath, stat } from 'node:fs/promises';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { Readable } from 'node:stream';
 
 const app = new Hono();
 const hopByHopHeaders = new Set([
@@ -92,6 +95,65 @@ function isPdfPath(pathname) {
   return pathname.toLowerCase().endsWith('.pdf');
 }
 
+function jsonErrorResponse(status, error) {
+  return new Response(JSON.stringify({ error }), {
+    status,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function encodeContentDispositionFilename(filename) {
+  const fallback = filename.replace(/[^A-Za-z0-9._-]/g, '_') || 'download';
+  const encoded = encodeURIComponent(filename);
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encoded}`;
+}
+
+async function createTarGzArchiveBuffer(targetPath) {
+  const parentPath = dirname(targetPath);
+  const entryName = basename(targetPath);
+  return new Promise((resolveArchive, rejectArchive) => {
+    const child = spawn('tar', ['-czf', '-', '-C', parentPath, '--', entryName], {
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    const chunks = [];
+    let stderr = '';
+
+    child.stdout.on('data', (chunk) => {
+      chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
+    });
+    child.stderr.on('data', (chunk) => {
+      stderr += chunk.toString();
+    });
+    child.on('error', rejectArchive);
+    child.on('close', (code) => {
+      if (code === 0) {
+        resolveArchive(Buffer.concat(chunks));
+        return;
+      }
+      rejectArchive(new Error(stderr.trim() || `tar failed (${code ?? 'unknown'})`));
+    });
+  });
+}
+
+function toWebStream(stream) {
+  return Readable.toWeb(stream);
+}
+
+function createTarGzArchiveStream(targetPath) {
+  const parentPath = dirname(targetPath);
+  const entryName = basename(targetPath);
+  const child = spawn('tar', ['-czf', '-', '-C', parentPath, '--', entryName], {
+    stdio: ['ignore', 'pipe', 'pipe'],
+  });
+
+  child.on('error', () => {
+    child.stdout.destroy();
+  });
+  child.stderr.on('data', () => {});
+
+  return toWebStream(child.stdout);
+}
+
 function isWithinPath(basePath, targetPath) {
   const rel = relative(basePath, targetPath);
   return rel === '' || (!rel.startsWith('..') && rel !== '' && !rel.startsWith('/'));
@@ -173,6 +235,44 @@ async function resolveManagedPdfTarget(c, managedConfig) {
   return { target: resolvedTarget };
 }
 
+async function resolveManagedDownloadTarget(c, managedConfig) {
+  const directory = c.req.query('directory') ?? '';
+  const path = c.req.query('path') ?? '';
+  const normalizedDirectory = directory.trim() ? resolve(directory.trim()) : '';
+  const normalizedTarget = path.trim() ? path.trim() : '';
+  if (!normalizedDirectory || !normalizedTarget) {
+    return { error: jsonErrorResponse(400, 'Invalid path') };
+  }
+
+  const allowedRoots = await fetchManagedProjectRoots(c, managedConfig);
+  if (allowedRoots.length === 0) {
+    return { error: jsonErrorResponse(400, 'Invalid path') };
+  }
+
+  const resolvedDirectory = await realpath(normalizedDirectory).catch(() => null);
+  if (!resolvedDirectory) {
+    return { error: jsonErrorResponse(400, 'Invalid path') };
+  }
+
+  const matchedRoot = allowedRoots.find((root) => isWithinPath(root, resolvedDirectory));
+  if (!matchedRoot) {
+    return { error: jsonErrorResponse(400, 'Invalid path') };
+  }
+
+  const absoluteTarget = normalizedTarget.startsWith('/')
+    ? resolve(normalizedTarget)
+    : resolve(resolvedDirectory, normalizedTarget);
+  const resolvedTarget = await realpath(absoluteTarget).catch(() => null);
+  if (!resolvedTarget) {
+    return { error: jsonErrorResponse(404, 'File read failed') };
+  }
+  if (!isWithinPath(resolvedDirectory, resolvedTarget) || !isWithinPath(matchedRoot, resolvedTarget)) {
+    return { error: jsonErrorResponse(400, 'Invalid path') };
+  }
+
+  return { target: resolvedTarget };
+}
+
 async function serveLocalPdfFile(c, managedConfig) {
   const resolved = await resolveManagedPdfTarget(c, managedConfig);
   if (resolved.error) return resolved.error;
@@ -184,6 +284,35 @@ async function serveLocalPdfFile(c, managedConfig) {
       headers: {
         'Content-Type': resolveMimeType(resolved.target),
         'Content-Length': String(file.byteLength),
+      },
+    });
+  } catch {
+    return c.json({ error: 'File read failed' }, 404);
+  }
+}
+
+async function serveManagedDownload(c, managedConfig) {
+  const resolved = await resolveManagedDownloadTarget(c, managedConfig);
+  if (resolved.error) return resolved.error;
+
+  try {
+    const targetStat = await stat(resolved.target);
+    if (targetStat.isDirectory()) {
+      const filename = `${basename(resolved.target)}.tar.gz`;
+      return new Response(createTarGzArchiveStream(resolved.target), {
+        status: 200,
+        headers: {
+          'Content-Type': 'application/gzip',
+          'Content-Disposition': encodeContentDispositionFilename(filename),
+        },
+      });
+    }
+
+    return new Response(toWebStream(createReadStream(resolved.target)), {
+      status: 200,
+      headers: {
+        'Content-Type': resolveMimeType(resolved.target),
+        'Content-Disposition': encodeContentDispositionFilename(basename(resolved.target)),
       },
     });
   } catch {
@@ -534,6 +663,7 @@ if (managedConfig) {
   app.get('/api/bootstrap', (c) => c.json(managedBootstrap));
   app.get('/api/global/event', (c) => relayManagedSseRequest(c, managedConfig));
   app.get('/api/file/content/pdf', (c) => serveLocalPdfFile(c, managedConfig));
+  app.get('/api/file/download', (c) => serveManagedDownload(c, managedConfig));
   for (const route of managedRestRoutes) {
     app.all(`/api${route}`, (c) => relayManagedRestRequest(c, managedConfig));
   }
