@@ -154,6 +154,13 @@ export function readFileContent(
   ) as Promise<unknown>;
 }
 
+export function createFileDownloadUrl(payload: { directory: string; path: string }) {
+  return createUrl('/file/download', {
+    directory: payload.directory,
+    path: payload.path,
+  });
+}
+
 export function getSessionDiff(payload: { sessionID: string; directory?: string }) {
   return getJson(`/session/${payload.sessionID}/diff`, {
     directory: payload.directory,

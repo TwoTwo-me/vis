@@ -63,6 +63,7 @@
               (payload: { mode: WorktreeSnapshotMode }) => openAllGitDiff(payload.mode)
             "
             @open-file="openFileViewer"
+            @download="downloadTreePath"
             @reload="reloadTree().then(() => refreshGitStatus())"
           />
           <div
@@ -5039,6 +5040,74 @@ function isPdfPath(path: string) {
 function buildPdfFileViewerSrc(directory: string, path: string) {
   const params = new URLSearchParams({ directory, path });
   return `/api/file/content/pdf?${params.toString()}`;
+}
+
+function readDownloadFilename(contentDisposition: string | null) {
+  if (!contentDisposition) return '';
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const quotedMatch = contentDisposition.match(/filename="([^"]+)"/i);
+  if (quotedMatch) return quotedMatch[1];
+  const bareMatch = contentDisposition.match(/filename=([^;]+)/i);
+  return bareMatch ? bareMatch[1].trim() : '';
+}
+
+async function downloadTreePath(payload: { path: string; isDirectory: boolean }) {
+  const directory = activeDirectory.value.trim();
+  if (!directory || typeof document === 'undefined') return;
+  const requestPath = splitFileContentDirectoryAndPath(payload.path, directory);
+  const href = opencodeApi.createFileDownloadUrl({
+    directory: requestPath.directory,
+    path: requestPath.path,
+  });
+  let objectUrl = '';
+  let link: HTMLAnchorElement | null = null;
+  try {
+    const response = await fetch(href);
+    if (!response.ok) {
+      const fallback = payload.isDirectory
+        ? 'Directory download failed.'
+        : 'File download failed.';
+      let message = fallback;
+      try {
+        const data = (await response.json()) as { error?: string };
+        if (typeof data?.error === 'string' && data.error.trim()) {
+          message = data.error.trim();
+        }
+      } catch (error) {
+        void error;
+      }
+      if (typeof window !== 'undefined') {
+        window.alert(message);
+      }
+      return;
+    }
+    const blob = await response.blob();
+    objectUrl = URL.createObjectURL(blob);
+    link = document.createElement('a');
+    link.href = objectUrl;
+    const filename = readDownloadFilename(response.headers.get('content-disposition'));
+    if (filename) link.download = filename;
+    link.rel = 'noopener';
+    link.style.display = 'none';
+    document.body.append(link);
+    link.click();
+  } catch {
+    if (typeof window !== 'undefined') {
+      window.alert(payload.isDirectory ? 'Directory download failed.' : 'File download failed.');
+    }
+  } finally {
+    if (link) link.remove();
+    if (objectUrl) {
+      window.setTimeout(() => URL.revokeObjectURL(objectUrl), 1000);
+    }
+  }
 }
 
 async function openFileViewer(path: string, lines?: string) {

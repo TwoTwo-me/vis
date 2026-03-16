@@ -324,6 +324,16 @@
         >
           {{ statusLabel(displayStatus(row.node.path)?.code) }}
         </button>
+        <button
+          v-if="canDownloadNode(row.node)"
+          type="button"
+          class="tree-action tree-download"
+          :title="row.node.type === 'directory' ? 'Download as tar.gz' : 'Download file'"
+          @click.stop="onDownloadClick(row.node)"
+          @dblclick.stop
+        >
+          <Icon icon="lucide:download" :width="13" :height="13" />
+        </button>
       </div>
       <div v-if="isLoading" class="tree-loading">Loading...</div>
       <div v-if="error" class="tree-error">{{ error }}</div>
@@ -423,6 +433,7 @@ const emit = defineEmits<{
   (event: 'open-diff', payload: { path: string; staged: boolean }): void;
   (event: 'open-diff-all', payload: { mode: 'staged' | 'changes' | 'all' }): void;
   (event: 'open-file', path: string): void;
+  (event: 'download', payload: { path: string; isDirectory: boolean }): void;
   (event: 'reload'): void;
 }>();
 
@@ -434,12 +445,6 @@ const pullMenuOpen = ref(false);
 const expanded = computed(() => new Set(props.expandedPaths));
 const branchIcon = computed(() => (props.branchInfo ? 'lucide:git-branch' : 'lucide:folder'));
 const branchName = computed(() => props.branchInfo?.branch ?? props.directoryName ?? 'no git');
-const upstreamRemote = computed(() => {
-  const upstream = props.branchInfo?.upstream;
-  if (!upstream) return 'origin';
-  const slashIdx = upstream.indexOf('/');
-  return slashIdx > 0 ? upstream.slice(0, slashIdx) : 'origin';
-});
 
 const branchTitle = computed(() => {
   const info = props.branchInfo;
@@ -870,6 +875,17 @@ function onRowDoubleClick(row: { node: TreeNode }) {
   }
   emit('open-file', row.node.path);
 }
+
+function canDownloadNode(node: TreeNode) {
+  if (node.synthetic) return false;
+  if (node.type === 'directory') return true;
+  const status = displayStatus(node.path);
+  return status?.code !== 'D';
+}
+
+function onDownloadClick(node: TreeNode) {
+  emit('download', { path: node.path, isDirectory: node.type === 'directory' });
+}
 </script>
 
 <style scoped>
@@ -1264,6 +1280,44 @@ function onRowDoubleClick(row: { node: TreeNode }) {
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
+}
+
+.tree-action {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  height: 18px;
+  border: 0;
+  border-radius: 4px;
+  background: transparent;
+  color: #94a3b8;
+  cursor: pointer;
+  padding: 0;
+  opacity: 0;
+  pointer-events: none;
+  transition:
+    opacity 0.12s ease,
+    background 0.12s ease,
+    color 0.12s ease;
+}
+
+.tree-row:hover .tree-action,
+.tree-row.is-selected .tree-action,
+.tree-action:focus-visible {
+  opacity: 1;
+  pointer-events: auto;
+}
+
+.tree-action:hover,
+.tree-action:focus-visible {
+  background: rgba(51, 65, 85, 0.55);
+  color: #cbd5e1;
+}
+
+.tree-action:focus-visible {
+  outline: 1px solid rgba(96, 165, 250, 0.7);
+  outline-offset: 1px;
 }
 
 /* --- Git status badge (base) --- */
