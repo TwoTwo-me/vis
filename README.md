@@ -23,6 +23,33 @@ In this model:
 - upstream credentials stay on the server, never in browser storage
 - your edge or reverse proxy handles user authentication before a request reaches vis
 
+### Install vis For An Existing OpenCode Server
+
+If OpenCode is already installed and running somewhere you can reach over HTTP, install vis from this repo and point it at that existing server.
+
+From this repo:
+
+```bash
+pnpm install
+pnpm build
+npm install -g .
+```
+
+That installs the `vis` CLI defined by this package.
+
+Then run vis against your existing OpenCode server URL:
+
+```bash
+VIS_MODE=managed \
+VIS_UPSTREAM_URL=http://127.0.0.1:4096 \
+VIS_EDGE_AUTH_MODE=edge \
+vis
+```
+
+Open `http://localhost:3000` by default, or set `VIS_PORT` if you want a different port.
+
+This flow assumes your existing OpenCode server is already serving the REST, SSE, and PTY endpoints that vis relays in managed mode. If the upstream requires a fixed server-side auth header, also set `VIS_UPSTREAM_AUTH_HEADER` before starting `vis`.
+
 ### Runtime Contract
 
 Set these environment variables on the vis server:
