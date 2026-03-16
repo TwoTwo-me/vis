@@ -10,6 +10,7 @@ import {
   connectWebSocketOnce,
   managedBootstrap,
   readSseFrame,
+  startCodexUsageStub,
   startUpstreamStub,
   startVisServer,
   startVisServerExpectingFailure,
@@ -429,4 +430,195 @@ test('GET /api/pty/:ptyID/connect relays the PTY websocket endpoint under /api',
   assert.equal(upgrade?.pathname, '/pty/pty-managed/connect');
   assert.equal(upgrade?.headers.authorization, 'Basic managed-upstream');
   assert.equal(upgrade?.clientMessage, 'ping-from-client');
+});
+
+function createCodexWhamPayload(nowSeconds = Math.floor(Date.now() / 1000)) {
+  return {
+    rate_limit: {
+      primary_window: {
+        used_percent: 35,
+        reset_at: nowSeconds + 3600,
+        limit_window_seconds: 5 * 3600,
+      },
+      secondary_window: {
+        used_percent: 40,
+        reset_at: nowSeconds * 1000 + 2 * 24 * 3600 * 1000,
+        limit_window_seconds: 7 * 24 * 3600,
+      },
+    },
+    code_review_rate_limit: {
+      primary_window: {
+        used_percent: 55,
+        reset_at: nowSeconds + 14 * 24 * 3600,
+        limit_window_seconds: 30 * 24 * 3600,
+      },
+    },
+  };
+}
+
+async function writeCodexAuthFixture(workspace, payload) {
+  const authPath = join(workspace, 'codex-auth.json');
+  await writeFile(authPath, JSON.stringify(payload));
+  return authPath;
+}
+
+async function writeCodexCacheFixture(workspace, payload) {
+  const cachePath = join(workspace, 'tmux-codex-usage.json');
+  await writeFile(cachePath, JSON.stringify({ payload }));
+  return cachePath;
+}
+
+test('GET /api/codex/usage returns the sanitized ok contract', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-codex-usage-ok-'));
+  const usageStub = await startCodexUsageStub({ body: createCodexWhamPayload() });
+  const authPath = await writeCodexAuthFixture(workspace, { openai: { access: 'test-access-token', accountId: 'acct_123' } });
+  const cachePath = join(workspace, 'codex-cache.json');
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    CODEX_USAGE_API_URL: `${usageStub.origin}/backend-api/wham/usage`,
+    CODEX_AUTH_FILE: authPath,
+    CODEX_QUOTA_CACHE_FILE: cachePath,
+    CODEX_QUOTA_CACHE_TTL_SEC: '1',
+    CODEX_QUOTA_STALE_SEC: '1800',
+  });
+
+  try {
+    const response = await fetch(`${localVis.origin}/api/codex/usage`);
+    assert.equal(response.status, 200, 'expected GET /api/codex/usage to exist');
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.match(response.headers.get('content-type') ?? '', /^application\/json\b/);
+    const body = await response.json();
+    assert.equal(body.state, 'ok');
+    assert.equal(body.stale, false);
+    assert.equal(body.windows.fiveHour.label, '5h');
+    assert.equal(body.windows.sevenDay.label, '7d');
+    assert.equal(body.windows.tools30Day.label, '30d');
+    assert.equal(body.windows.fiveHour.remainingPercent, 65);
+    assert.equal(body.windows.sevenDay.remainingPercent, 60);
+    assert.equal(body.windows.tools30Day.remainingPercent, 45);
+    assert.equal('token' in body, false);
+    assert.equal('accountId' in body, false);
+    assert.equal('authorization' in body, false);
+    assert.equal('authFile' in body, false);
+    assert.equal('payload' in body, false);
+    assert.ok(usageStub.requests.length > 0, 'expected the usage stub to receive a request');
+    assert.equal(usageStub.requests[0]?.headers.authorization, 'Bearer test-access-token');
+    assert.equal(usageStub.requests[0]?.headers['chatgpt-account-id'], 'acct_123');
+  } finally {
+    await Promise.allSettled([localVis.stop(), usageStub.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('GET /api/codex/usage returns login_required without auth', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-codex-usage-login-'));
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    CODEX_AUTH_FILE: join(workspace, 'missing-auth.json'),
+    CODEX_QUOTA_CACHE_FILE: join(workspace, 'codex-cache.json'),
+  });
+
+  try {
+    const response = await fetch(`${localVis.origin}/api/codex/usage`);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get('cache-control'), 'no-store');
+    assert.equal(body.state, 'login_required');
+    assert.equal(body.message, 'Codex login required');
+    assert.equal(body.windows.fiveHour.label, '5h');
+    assert.equal(body.windows.sevenDay.label, '7d');
+    assert.equal(body.windows.tools30Day.label, '30d');
+    assert.equal(body.windows.fiveHour.remainingPercent, null);
+  } finally {
+    await Promise.allSettled([localVis.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('GET /api/codex/usage returns unavailable on malformed upstream payload', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-codex-usage-unavailable-'));
+  const usageStub = await startCodexUsageStub({ body: 'not-json', contentType: 'application/json' });
+  const authPath = await writeCodexAuthFixture(workspace, { openai: { access: 'test-access-token' } });
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    CODEX_USAGE_API_URL: `${usageStub.origin}/backend-api/wham/usage`,
+    CODEX_AUTH_FILE: authPath,
+    CODEX_QUOTA_CACHE_FILE: join(workspace, 'codex-cache.json'),
+    CODEX_QUOTA_CACHE_TTL_SEC: '1',
+  });
+
+  try {
+    const response = await fetch(`${localVis.origin}/api/codex/usage`);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.state, 'unavailable');
+    assert.equal(body.message, 'Codex quota unavailable');
+    assert.equal(body.windows.fiveHour.label, '5h');
+    assert.equal(body.windows.sevenDay.label, '7d');
+    assert.equal(body.windows.tools30Day.label, '30d');
+  } finally {
+    await Promise.allSettled([localVis.stop(), usageStub.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('GET /api/codex/usage returns stale cached data when upstream fails', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-codex-usage-stale-'));
+  const usageStub = await startCodexUsageStub({ statusCode: 502, body: { error: 'bad gateway' } });
+  const authPath = await writeCodexAuthFixture(workspace, { openai: { access: 'test-access-token' } });
+  const cachePath = await writeCodexCacheFixture(workspace, createCodexWhamPayload());
+  await new Promise((resolve) => setTimeout(resolve, 2100));
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    CODEX_USAGE_API_URL: `${usageStub.origin}/backend-api/wham/usage`,
+    CODEX_AUTH_FILE: authPath,
+    CODEX_QUOTA_CACHE_FILE: cachePath,
+    CODEX_QUOTA_CACHE_TTL_SEC: '1',
+    CODEX_QUOTA_STALE_SEC: '1800',
+  });
+
+  try {
+    const response = await fetch(`${localVis.origin}/api/codex/usage`);
+    const body = await response.json();
+    assert.equal(response.status, 200);
+    assert.equal(body.state, 'ok');
+    assert.equal(body.stale, true);
+    assert.equal(typeof body.staleMinutes, 'number');
+  } finally {
+    await Promise.allSettled([localVis.stop(), usageStub.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('GET /api/codex/usage keeps auth-file account id when CODEX_ACCESS_TOKEN is explicit', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-codex-usage-explicit-token-'));
+  const usageStub = await startCodexUsageStub({ body: createCodexWhamPayload() });
+  const authPath = await writeCodexAuthFixture(workspace, { openai: { access: 'file-token', accountId: 'acct_from_file' } });
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    CODEX_USAGE_API_URL: `${usageStub.origin}/backend-api/wham/usage`,
+    CODEX_AUTH_FILE: authPath,
+    CODEX_ACCESS_TOKEN: 'explicit-token',
+    CODEX_QUOTA_CACHE_FILE: join(workspace, 'codex-cache.json'),
+  });
+
+  try {
+    const response = await fetch(`${localVis.origin}/api/codex/usage`);
+    assert.equal(response.status, 200);
+    assert.equal(usageStub.requests[0]?.headers.authorization, 'Bearer explicit-token');
+    assert.equal(usageStub.requests[0]?.headers['chatgpt-account-id'], 'acct_from_file');
+  } finally {
+    await Promise.allSettled([localVis.stop(), usageStub.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
 });

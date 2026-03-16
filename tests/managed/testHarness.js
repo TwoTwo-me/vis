@@ -96,6 +96,52 @@ async function readRequestBody(req) {
   return raw;
 }
 
+export async function startCodexUsageStub(options = {}) {
+  const requests = [];
+  const port = await getFreePort();
+  const statusCode = options.statusCode ?? 200;
+  const headers = { 'content-type': options.contentType ?? 'application/json', ...(options.headers ?? {}) };
+  const body = options.body;
+  const server = createServer(async (req, res) => {
+    const url = new URL(req.url ?? '/', `http://${req.headers.host ?? '127.0.0.1'}`);
+    requests.push({
+      method: req.method ?? 'GET',
+      pathname: url.pathname,
+      searchParams: Object.fromEntries(url.searchParams.entries()),
+      headers: { ...req.headers },
+    });
+
+    if (url.pathname !== '/backend-api/wham/usage') {
+      res.writeHead(404, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Not found' }));
+      return;
+    }
+
+    res.writeHead(statusCode, headers);
+    if (body === undefined || body === null) {
+      res.end();
+      return;
+    }
+    res.end(typeof body === 'string' ? body : JSON.stringify(body));
+  });
+
+  server.listen(port, '127.0.0.1');
+  await once(server, 'listening');
+
+  return {
+    origin: `http://127.0.0.1:${port}`,
+    requests,
+    async stop() {
+      await new Promise((resolveClose, rejectClose) => {
+        server.close((error) => {
+          if (error) rejectClose(error);
+          else resolveClose();
+        });
+      });
+    },
+  };
+}
+
 export async function startUpstreamStub() {
   const requests = [];
   const upgrades = [];

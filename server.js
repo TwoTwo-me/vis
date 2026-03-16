@@ -9,6 +9,7 @@ import { request as requestHTTPS } from 'node:https';
 import { readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
+import { getCodexUsage } from './server/codexUsage.js';
 
 const app = new Hono();
 const hopByHopHeaders = new Set([
@@ -661,6 +662,11 @@ const managedConfig = readManagedConfig(process.env);
 
 if (managedConfig) {
   app.get('/api/bootstrap', (c) => c.json(managedBootstrap));
+  app.get('/api/codex/usage', async (c) => {
+    const payload = await getCodexUsage(process.env);
+    c.header('Cache-Control', 'no-store');
+    return c.json(payload, 200);
+  });
   app.get('/api/global/event', (c) => relayManagedSseRequest(c, managedConfig));
   app.get('/api/file/content/pdf', (c) => serveLocalPdfFile(c, managedConfig));
   app.get('/api/file/download', (c) => serveManagedDownload(c, managedConfig));
