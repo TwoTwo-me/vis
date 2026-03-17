@@ -18,13 +18,6 @@ function resolveHomeDirectory() {
   return process.env.HOME?.trim() || homedir();
 }
 
-function selectAuthFile(env = process.env) {
-  if (env.CODEX_AUTH_FILE?.trim()) return env.CODEX_AUTH_FILE.trim();
-  const homeDir = resolveHomeDirectory();
-  const dataHome = env.XDG_DATA_HOME?.trim() || join(homeDir, '.local', 'share');
-  return [join(dataHome, 'opencode', 'auth.json'), join(homeDir, '.codex', 'auth.json')][0];
-}
-
 function authCandidates(env = process.env) {
   const homeDir = resolveHomeDirectory();
   const dataHome = env.XDG_DATA_HOME?.trim() || join(homeDir, '.local', 'share');
