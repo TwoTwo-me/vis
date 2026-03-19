@@ -129,24 +129,29 @@ export function useSubagentWindows(options: UseSubagentWindowsOptions) {
       ? `🤖 [${modelLabel}] ${agentPart}Working...`
       : `🤖 ${agentPart}Working...`;
 
-    if (!suppressAutoWindows?.value) {
-      void fw.open(windowKey, {
-        component: subagentComponent,
-        props: {
-          entries: [...sessionEntries],
-          theme: theme(),
-        },
-        title,
-        scroll: 'follow',
-        resizable: true,
-        closable: false,
-        color: SUBAGENT_WINDOW_COLOR,
-        variant: 'message',
-        expiresAt: Number.MAX_SAFE_INTEGER,
-        width: 600,
-        height: 400,
-      });
-    }
+    const shouldSuppress =
+      Boolean(suppressAutoWindows?.value) || Boolean(fw.get(windowKey)?.suppressedBySetting);
+    void fw.open(windowKey, {
+      component: subagentComponent,
+      props: {
+        entries: [...sessionEntries],
+        theme: theme(),
+      },
+      title,
+      scroll: 'follow',
+      resizable: true,
+      closable: false,
+      color: SUBAGENT_WINDOW_COLOR,
+      variant: 'message',
+      taskbarEligible: true,
+      taskbarGroup: 'auto',
+      taskbarKind: 'subagent',
+      minimizable: true,
+      suppressedBySetting: shouldSuppress,
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      width: 600,
+      height: 400,
+    });
   }
 
   const unsubs: Array<() => void> = [];

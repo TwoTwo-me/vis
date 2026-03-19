@@ -140,6 +140,7 @@
               :attachments="attachments"
               :file-candidates="files"
               :file-candidates-version="fileCacheVersion"
+              :floating-window-entries="fw.entries.value"
               :message-input="messageInput"
               :selected-mode="selectedMode"
               :selected-model="selectedModel"
@@ -154,17 +155,19 @@
               @add-attachments="handleAddAttachments"
               @remove-attachment="removeAttachment"
               @open-image="handleOpenImage"
+              @restore-floating-window="restoreTaskbarWindow"
             />
           </footer>
         </div>
         <div ref="toolWindowCanvasEl" class="tool-window-canvas">
           <TransitionGroup appear name="scale">
             <FloatingWindow
-              v-for="entry in fw.entries.value"
+              v-for="entry in fw.canvasEntries.value"
               :key="entry.key"
               :entry="entry"
               :manager="fw"
               @focus="fw.bringToFront(entry.key)"
+              @minimize="handleFloatingWindowMinimize(entry.key)"
               @close="handleFloatingWindowClose(entry.key)"
             />
           </TransitionGroup>
@@ -592,20 +595,20 @@ type ManagedBootstrapPayload = {
 
 const fw = useFloatingWindows();
 
-// Close auto-opened floating windows when suppress is toggled ON.
+// Hide currently rendered auto-opened floating windows when suppress is toggled ON.
 // Tool auto windows: closable === false AND finite expiry (not Infinity).
 // Reasoning/subagent windows: closable === false AND key starts with 'reasoning:' or 'subagent:'.
 // Permission/question (closable: false, expiry: Infinity) are excluded.
 watch(suppressAutoWindows, (suppressed) => {
   if (!suppressed) return;
-  for (const entry of fw.entries.value) {
+  for (const entry of fw.canvasEntries.value) {
     if (
       !entry.closable &&
       (entry.expiresAt < Number.MAX_SAFE_INTEGER ||
         entry.key.startsWith('reasoning:') ||
         entry.key.startsWith('subagent:'))
     ) {
-      void fw.close(entry.key);
+      fw.setSuppressed(entry.key, true);
     }
   }
 });
@@ -2935,6 +2938,9 @@ function ensureShellWindow(pty: PtyInfo) {
     props: { shellId: pty.id },
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'shell',
     scroll: 'none',
     color: '#a855f7',
     title: pty.title || 'Shell',
@@ -3209,6 +3215,34 @@ function handleFloatingWindowClose(key: string) {
     return;
   }
   void fw.close(key);
+}
+
+function handleFloatingWindowMinimize(key: string) {
+  fw.minimize(key);
+}
+
+function focusFloatingWindowBody(key: string) {
+  nextTick(() => {
+    const body = document.querySelector(
+      `[data-floating-key="${key}"] .floating-window-body`,
+    ) as HTMLElement | null;
+    body?.focus();
+  });
+}
+
+function restoreTaskbarWindow(key: string) {
+  const entry = fw.get(key);
+  if (!entry) return;
+  fw.restore(key);
+  fw.bringToFront(key);
+  focusFloatingWindowBody(key);
+  if (key.startsWith('shell:')) {
+    const ptyId = key.slice('shell:'.length);
+    const shellSession = shellSessionsByPtyId.get(ptyId);
+    if (shellSession) {
+      nextTick(() => shellSession.terminal.focus());
+    }
+  }
 }
 
 function disposeShellWindows() {
@@ -3525,6 +3559,9 @@ function openDebugSessionViewer() {
     },
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'debug',
     focusOnOpen: true,
     scroll: 'manual',
     title: 'Debug: Session Graph',
@@ -3639,6 +3676,9 @@ function openDebugNotificationViewer() {
     },
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'debug',
     focusOnOpen: true,
     scroll: 'manual',
     title: 'Debug: Notifications',
@@ -4519,7 +4559,7 @@ async function openGitDiff(payload: { path: string; staged: boolean }) {
   const { path, staged } = payload;
   const key = `git-diff:${staged ? 'staged' : 'changes'}:${path}`;
   if (fw.has(key)) {
-    fw.bringToFront(key);
+    restoreTaskbarWindow(key);
     return;
   }
 
@@ -4531,6 +4571,9 @@ async function openGitDiff(payload: { path: string; staged: boolean }) {
     variant: 'plain',
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'diff',
     focusOnOpen: true,
     scroll: 'manual',
     title: `${path} (${mode})`,
@@ -4568,6 +4611,9 @@ async function openGitDiff(payload: { path: string; staged: boolean }) {
       },
       closable: true,
       resizable: true,
+      taskbarEligible: true,
+      taskbarGroup: 'manual',
+      taskbarKind: 'diff',
       focusOnOpen: true,
       scroll: 'manual',
       title: `${path} (${mode})`,
@@ -4588,7 +4634,7 @@ async function openGitDiff(payload: { path: string; staged: boolean }) {
 async function openAllGitDiff(mode: WorktreeSnapshotMode = 'all') {
   const key = `git-diff:${mode}`;
   if (fw.has(key)) {
-    fw.bringToFront(key);
+    restoreTaskbarWindow(key);
     return;
   }
 
@@ -4599,6 +4645,9 @@ async function openAllGitDiff(mode: WorktreeSnapshotMode = 'all') {
     variant: 'plain',
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'diff',
     focusOnOpen: true,
     scroll: 'manual',
     title: 'Loading...',
@@ -4654,6 +4703,9 @@ async function openAllGitDiff(mode: WorktreeSnapshotMode = 'all') {
       title,
       closable: true,
       resizable: true,
+      taskbarEligible: true,
+      taskbarGroup: 'manual',
+      taskbarKind: 'diff',
       focusOnOpen: true,
       scroll: 'manual',
       x: pos.x,
@@ -4675,7 +4727,7 @@ function handleShowMessageDiff(payload: { messageKey: string; diffs: Array<Messa
   if (!diffs || diffs.length === 0) return;
   const key = `message-diff:${messageKey}`;
   if (fw.has(key)) {
-    fw.bringToFront(key);
+    restoreTaskbarWindow(key);
     return;
   }
   const hasBeforeAfter = diffs.some(
@@ -4713,6 +4765,9 @@ function handleShowMessageDiff(payload: { messageKey: string; diffs: Array<Messa
     },
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'diff',
     focusOnOpen: true,
     scroll: 'manual',
     title,
@@ -4729,7 +4784,7 @@ async function handleShowCommit(hashRaw: string) {
   if (!/^[0-9a-f]{7,40}$/i.test(hash)) return;
   const key = `commit-diff:${hash}`;
   if (fw.has(key)) {
-    fw.bringToFront(key);
+    restoreTaskbarWindow(key);
     return;
   }
 
@@ -4740,6 +4795,9 @@ async function handleShowCommit(hashRaw: string) {
     variant: 'plain',
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'diff',
     focusOnOpen: true,
     scroll: 'manual',
     title: `commit ${hash}`,
@@ -4797,6 +4855,9 @@ async function handleShowCommit(hashRaw: string) {
       title,
       closable: true,
       resizable: true,
+      taskbarEligible: true,
+      taskbarGroup: 'manual',
+      taskbarKind: 'diff',
       focusOnOpen: true,
       scroll: 'manual',
       x: pos.x,
@@ -4828,6 +4889,11 @@ function openToolPartAsWindow(
   };
 
   const patchEvents = extractToolPatch(payload, toolRendererHelpers as any);
+  const baseSuppressedBySetting =
+    typeof overrides?.suppressedBySetting === 'boolean' ? overrides.suppressedBySetting : false;
+  function resolveSuppressedBySetting(key: string) {
+    return Boolean(baseSuppressedBySetting) || Boolean(fw.get(key)?.suppressedBySetting);
+  }
   if (patchEvents) {
     patchEvents.forEach((patchEvent: any, index: number) => {
       const rawId = patchEvent.callId ?? `apply_patch:${index}`;
@@ -4850,6 +4916,7 @@ function openToolPartAsWindow(
         title: patchEvent.title,
         color: toolColor(patchEvent.toolName),
         ...overrides,
+        suppressedBySetting: resolveSuppressedBySetting(key),
       });
       openedKeys.push(key);
     });
@@ -4879,6 +4946,7 @@ function openToolPartAsWindow(
             : undefined,
         color: toolColor(toolName),
         ...overrides,
+        suppressedBySetting: resolveSuppressedBySetting(key),
       });
       openedKeys.push(key);
     }
@@ -4907,6 +4975,9 @@ function handleOpenHistoryTool(payload: { part: ToolPart }) {
     {
       closable: true,
       resizable: true,
+      taskbarEligible: true,
+      taskbarGroup: 'manual',
+      taskbarKind: 'tool-history',
       focusOnOpen: true,
       expiry: Infinity,
       scroll: 'manual',
@@ -4937,6 +5008,9 @@ function handleOpenHistoryReasoning(payload: { part: ReasoningPart }) {
     scroll: 'manual',
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'history',
     focusOnOpen: true,
     color: '#8b5cf6',
     variant: 'message',
@@ -4966,7 +5040,7 @@ function handleShowThreadHistory(payload: { entries: ThreadHistoryEntry[] }) {
   const key = 'thread-history';
   if (fw.has(key)) {
     fw.updateOptions(key, { props: { entries } });
-    fw.bringToFront(key);
+    restoreTaskbarWindow(key);
     return;
   }
   const { width, height } = fw.getExtent();
@@ -4987,6 +5061,9 @@ function handleShowThreadHistory(payload: { entries: ThreadHistoryEntry[] }) {
     smoothEngine: 'native',
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'history',
     focusOnOpen: true,
     variant: 'message',
     expiry: Infinity,
@@ -5003,7 +5080,7 @@ function handleOpenImage(payload: { url: string; filename: string; mime: string 
   const viewerType = mime === 'application/pdf' ? 'pdf' : 'image';
   const key = `${viewerType}-viewer:${url}`;
   if (fw.has(key)) {
-    fw.bringToFront(key);
+    restoreTaskbarWindow(key);
     return;
   }
   const pos = getFileViewerPosition();
@@ -5016,6 +5093,9 @@ function handleOpenImage(payload: { url: string; filename: string; mime: string 
     },
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'image',
     focusOnOpen: true,
     scroll: 'manual',
     title: filename || (mime === 'application/pdf' ? 'PDF' : 'Image'),
@@ -5139,7 +5219,7 @@ async function downloadTreePath(payload: { path: string; isDirectory: boolean })
 async function openFileViewer(path: string, lines?: string) {
   const key = toFileViewerKey(path, lines);
   if (fw.has(key)) {
-    fw.bringToFront(key);
+    restoreTaskbarWindow(key);
     return;
   }
   const pos = getFileViewerPosition(0.18, 0.14);
@@ -5155,6 +5235,9 @@ async function openFileViewer(path: string, lines?: string) {
     },
     closable: true,
     resizable: true,
+    taskbarEligible: true,
+    taskbarGroup: 'manual',
+    taskbarKind: 'file',
     focusOnOpen: true,
     scroll: 'manual',
     title: toFileViewerTitle(path, lines),
@@ -5660,8 +5743,13 @@ onMounted(() => {
   globalEventUnsubscribers.push(
     sessionScope.on('message.part.updated', ({ part }) => {
       if (part.type !== 'tool') return;
-      if (suppressAutoWindows.value) return;
-      openToolPartAsWindow(part);
+      openToolPartAsWindow(part, {
+        taskbarEligible: true,
+        taskbarGroup: 'auto',
+        taskbarKind: 'tool',
+        minimizable: true,
+        suppressedBySetting: suppressAutoWindows.value,
+      });
     }),
   );
 });
