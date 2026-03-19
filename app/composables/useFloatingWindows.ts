@@ -1,6 +1,21 @@
 import { reactive, computed, markRaw, onUnmounted, type Component } from 'vue';
 import { renderWorkerHtml } from '../utils/workerRenderer';
 
+export type FloatingWindowTaskbarGroup = 'manual' | 'auto' | 'prompt';
+
+export type FloatingWindowTaskbarKind =
+  | 'shell'
+  | 'file'
+  | 'image'
+  | 'diff'
+  | 'history'
+  | 'debug'
+  | 'tool-history'
+  | 'tool'
+  | 'reasoning'
+  | 'subagent'
+  | 'prompt';
+
 export interface FloatingWindowEntry {
   key: string;
   component?: Component;
@@ -21,6 +36,12 @@ export interface FloatingWindowEntry {
   zIndex: number;
   closable: boolean;
   resizable: boolean;
+  taskbarEligible: boolean;
+  taskbarGroup?: FloatingWindowTaskbarGroup;
+  taskbarKind?: FloatingWindowTaskbarKind;
+  minimizable: boolean;
+  minimizedByUser: boolean;
+  suppressedBySetting: boolean;
   scroll: 'follow' | 'force' | 'manual' | 'none';
   smoothEngine?: 'raf' | 'native';
   focusOnOpen?: boolean;
@@ -44,6 +65,10 @@ const TITLEBAR_VISIBLE_PX = 32;
 const DEFAULT_OPTS: Partial<FloatingWindowEntry> = {
   closable: false,
   resizable: false,
+  taskbarEligible: false,
+  minimizable: false,
+  minimizedByUser: false,
+  suppressedBySetting: false,
   scroll: 'force',
   width: 600,
   height: 400,
@@ -58,9 +83,22 @@ const MANUAL_ZINDEX_OFFSET = 10000;
 
 let zIndexCounter = 100;
 
+function isPromptTier(key: string): boolean {
+  return key.startsWith('permission:') || key.startsWith('question:');
+}
+
 function isManualTier(key: string, closable?: boolean): boolean {
   if (closable) return true;
-  return key.startsWith('permission:') || key.startsWith('question:');
+  return isPromptTier(key);
+}
+
+function resolveTaskbarGroup(
+  key: string,
+  taskbarGroup?: FloatingWindowTaskbarGroup,
+): FloatingWindowTaskbarGroup | undefined {
+  if (taskbarGroup) return taskbarGroup;
+  if (isPromptTier(key)) return 'prompt';
+  return undefined;
 }
 
 function nextZIndex(manualTier: boolean): number {
@@ -121,6 +159,9 @@ function resolveExpiresAt(
 export function useFloatingWindows() {
   const entriesMap = reactive(new Map<string, FloatingWindowEntry>());
   const entries = computed(() => [...entriesMap.values()].filter((e) => e.isReady));
+  const canvasEntries = computed(
+    () => entries.value.filter((entry) => !entry.minimizedByUser && !entry.suppressedBySetting),
+  );
   let extent: Extent = {
     width: typeof window !== 'undefined' ? window.innerWidth : 1920,
     height: typeof window !== 'undefined' ? window.innerHeight : 1080,
@@ -182,11 +223,16 @@ export function useFloatingWindows() {
       ...existing,
       ...opts,
       key,
-      time: Date.now(),
+      time: existing?.time ?? Date.now(),
       zIndex: existing
         ? existing.zIndex
         : nextZIndex(isManualTier(key, opts.closable ?? existingClosable)),
     } as FloatingWindowEntry;
+
+    merged.taskbarGroup = resolveTaskbarGroup(key, merged.taskbarGroup);
+    if (merged.taskbarEligible && merged.taskbarGroup !== 'prompt') {
+      merged.minimizable = true;
+    }
 
     // When updating an existing entry, merge props instead of replacing
     if (existing && existing.props && opts.props) {
@@ -297,6 +343,25 @@ export function useFloatingWindows() {
     if (partialOpts.status === 'completed' || partialOpts.status === 'error') {
       scheduleExpiry(key, merged.expiresAt);
     }
+  }
+
+  function minimize(key: string): void {
+    const entry = entriesMap.get(key);
+    if (!entry) return;
+    entry.minimizedByUser = true;
+  }
+
+  function restore(key: string): void {
+    const entry = entriesMap.get(key);
+    if (!entry) return;
+    entry.minimizedByUser = false;
+    entry.suppressedBySetting = false;
+  }
+
+  function setSuppressed(key: string, suppressed: boolean): void {
+    const entry = entriesMap.get(key);
+    if (!entry) return;
+    entry.suppressedBySetting = suppressed;
   }
 
   async function setContent(key: string, text: string, lang?: string): Promise<void> {
@@ -416,8 +481,12 @@ export function useFloatingWindows() {
 
   return {
     entries,
+    canvasEntries,
     open,
     updateOptions,
+    minimize,
+    restore,
+    setSuppressed,
     setContent,
     appendContent,
     setTitle,

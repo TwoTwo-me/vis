@@ -188,24 +188,29 @@ export function useReasoningWindows(options: UseReasoningWindowsOptions) {
         : undefined;
     const title = titleTag ? `🤔 ${titleTag} Thinking...` : '🤔 Thinking...';
 
-    if (!suppressAutoWindows?.value) {
-      void fw.open(windowKey, {
-        component: reasoningComponent,
-        props: {
-          entries: [...sessionEntries],
-          theme: theme(),
-        },
-        title,
-        scroll: 'follow',
-        resizable: true,
-        closable: false,
-        color: REASONING_WINDOW_COLOR,
-        variant: 'message',
-        expiresAt: Number.MAX_SAFE_INTEGER,
-        width: 600,
-        height: 400,
-      });
-    }
+    const shouldSuppress =
+      Boolean(suppressAutoWindows?.value) || Boolean(fw.get(windowKey)?.suppressedBySetting);
+    void fw.open(windowKey, {
+      component: reasoningComponent,
+      props: {
+        entries: [...sessionEntries],
+        theme: theme(),
+      },
+      title,
+      scroll: 'follow',
+      resizable: true,
+      closable: false,
+      color: REASONING_WINDOW_COLOR,
+      variant: 'message',
+      taskbarEligible: true,
+      taskbarGroup: 'auto',
+      taskbarKind: 'reasoning',
+      minimizable: true,
+      suppressedBySetting: shouldSuppress,
+      expiresAt: Number.MAX_SAFE_INTEGER,
+      width: 600,
+      height: 400,
+    });
 
     if (part.time?.end) {
       markReasoningFinished(resolvedSessionId, messageId);
