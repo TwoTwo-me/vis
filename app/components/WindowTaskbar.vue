@@ -222,6 +222,7 @@ onBeforeUnmount(() => {
 .window-taskbar.has-items {
   flex: 1 1 auto;
   width: auto;
+  min-width: 32px;
 }
 
 .window-taskbar-track {
