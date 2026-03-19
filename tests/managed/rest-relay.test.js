@@ -89,6 +89,7 @@ test('deny-by-default blocks non-allowlisted managed API routes', async () => {
     { path: '/api/auth/github', method: 'PUT' },
     { path: '/api/config', method: 'GET' },
     { path: '/api/global/config', method: 'GET' },
+    { path: '/api/vis/token-providers', method: 'GET' },
   ];
 
   for (const denied of deniedRequests) {
