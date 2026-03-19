@@ -357,6 +357,11 @@
           </Dropdown>
         </div>
         <div class="input-actions">
+          <WindowTaskbar
+            class="input-taskbar"
+            :entries="props.floatingWindowEntries"
+            @activate="$emit('restore-floating-window', $event)"
+          />
           <button
             type="button"
             class="input-button suppress-button"
@@ -427,6 +432,8 @@ import Dropdown from './Dropdown.vue';
 import DropdownItem from './Dropdown/Item.vue';
 import DropdownLabel from './Dropdown/Label.vue';
 import DropdownSearch from './Dropdown/Search.vue';
+import WindowTaskbar from './WindowTaskbar.vue';
+import type { FloatingWindowEntry } from '../composables/useFloatingWindows';
 import { useMessages } from '../composables/useMessages';
 import { useFavoriteMessages } from '../composables/useFavoriteMessages';
 import { useSettings } from '../composables/useSettings';
@@ -468,6 +475,7 @@ const props = defineProps<{
   attachments: Array<{ id: string; filename: string; mime: string; dataUrl: string }>;
   fileCandidates: string[];
   fileCandidatesVersion: number;
+  floatingWindowEntries: readonly FloatingWindowEntry[];
   agentColor?: string;
   resolveAgentColor?: (agent?: string) => string;
   disabled?: boolean;
@@ -492,6 +500,7 @@ const emit = defineEmits<{
   (event: 'add-attachments', files: File[]): void;
   (event: 'remove-attachment', id: string): void;
   (event: 'open-image', payload: { url: string; filename: string; mime: string }): void;
+  (event: 'restore-floating-window', key: string): void;
 }>();
 
 const messageValue = computed({
@@ -1851,9 +1860,15 @@ const inputMessageStyle = computed(() => {
 .input-actions {
   display: flex;
   align-items: center;
+  justify-content: flex-end;
   gap: 4px;
   margin-left: auto;
-  flex: 0 0 auto;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.input-taskbar {
+  min-width: 0;
 }
 
 .suppress-button {
