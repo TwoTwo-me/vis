@@ -1,11 +1,19 @@
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, stat, writeFile } from 'node:fs/promises';
 import { once } from 'node:events';
 import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { after, before, test } from 'node:test';
 import { gunzipSync } from 'node:zlib';
+import {
+  getTokenProvidersFile,
+  loadTokenProviders,
+  parseTokenProviderOutput,
+  refreshTokenProviders,
+  saveTokenProviders,
+  testTokenProvider,
+} from '../../server/visTokenProviders.js';
 import {
   connectWebSocketOnce,
   managedBootstrap,
@@ -66,6 +74,15 @@ async function getUnusedOrigin() {
   });
 
   return `http://127.0.0.1:${address.port}`;
+}
+
+function toShellWord(value) {
+  return `'${String(value).replace(/'/g, `'\\''`)}'`;
+}
+
+function buildNodeCommand(script, ...args) {
+  const argv = args.map((arg) => ` ${toShellWord(arg)}`).join('');
+  return `${toShellWord(process.execPath)} -e ${toShellWord(script)}${argv}`;
 }
 
 async function startProjectRootStub(projectRoot) {
@@ -620,5 +637,631 @@ test('GET /api/codex/usage keeps auth-file account id when CODEX_ACCESS_TOKEN is
     assert.equal(usageStub.requests[0]?.headers['chatgpt-account-id'], 'acct_from_file');
   } finally {
     await Promise.allSettled([localVis.stop(), usageStub.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('GET and PUT /api/vis/token-providers/config round-trip full provider definitions without upstream relay', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-config-route-'));
+  const env = {
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    HOME: workspace,
+    XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+  const localVis = await startVisServer(env);
+  const definitions = [
+    {
+      id: 'codex',
+      name: 'Codex',
+      command: 'printf "7d | 30%\\n"',
+      updatedAt: Date.parse('2026-03-19T00:00:00.000Z'),
+    },
+    {
+      id: 'tools',
+      name: 'Tools',
+      command: 'printf "30d | 54%\\n"',
+      updatedAt: Date.parse('2026-03-19T00:00:01.000Z'),
+    },
+  ];
+  const requestCount = upstream.requests.length;
+
+  try {
+    const initialGet = await fetch(`${localVis.origin}/api/vis/token-providers/config`);
+    assert.equal(initialGet.status, 200, 'expected vis token provider config route to exist');
+    assert.deepEqual(await initialGet.json(), { definitions: [] });
+
+    const putResponse = await fetch(`${localVis.origin}/api/vis/token-providers/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ definitions }),
+    });
+    assert.equal(putResponse.status, 200, 'expected vis token provider config save route to exist');
+    assert.deepEqual(await putResponse.json(), { definitions });
+
+    const getResponse = await fetch(`${localVis.origin}/api/vis/token-providers/config`);
+    assert.equal(getResponse.status, 200, 'expected vis token provider config load route to exist');
+    assert.deepEqual(await getResponse.json(), { definitions });
+
+    const loaded = await loadTokenProviders({
+      ...process.env,
+      HOME: workspace,
+      XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+      XDG_DATA_HOME: join(workspace, 'xdg-data'),
+    });
+    assert.deepEqual(loaded.providers, definitions.map((definition) => ({
+      ...definition,
+      updatedAt: new Date(definition.updatedAt).toISOString(),
+    })));
+    assert.equal(
+      upstream.requests.length,
+      requestCount,
+      'managed vis token provider config routes must not proxy upstream requests',
+    );
+  } finally {
+    await Promise.allSettled([localVis.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('PUT /api/vis/token-providers/config accepts browser save payloads without updatedAt', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-config-browser-route-'));
+  const env = {
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    HOME: workspace,
+    XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+  const localVis = await startVisServer(env);
+  const initialDefinitions = [
+    {
+      id: 'codex',
+      name: 'Codex',
+      command: 'printf "7d | 30%\\n"',
+      updatedAt: Date.parse('2026-03-19T00:00:00.000Z'),
+    },
+    {
+      id: 'tools',
+      name: 'Tools',
+      command: 'printf "30d | 54%\\n"',
+      updatedAt: Date.parse('2026-03-19T00:00:01.000Z'),
+    },
+  ];
+  const browserDefinitions = initialDefinitions.map(({ updatedAt: _updatedAt, ...definition }) => definition);
+
+  try {
+    const initialPut = await fetch(`${localVis.origin}/api/vis/token-providers/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ definitions: initialDefinitions }),
+    });
+    assert.equal(initialPut.status, 200);
+
+    const browserPut = await fetch(`${localVis.origin}/api/vis/token-providers/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ definitions: browserDefinitions }),
+    });
+    assert.equal(browserPut.status, 200, 'expected browser save payload without updatedAt to succeed');
+
+    const browserBody = await browserPut.json();
+    assert.deepEqual(
+      browserBody.definitions.map(({ id, name, command }) => ({ id, name, command })),
+      browserDefinitions,
+    );
+    assert.deepEqual(
+      browserBody.definitions.map((definition) => definition.updatedAt),
+      initialDefinitions.map((definition) => definition.updatedAt),
+      'expected unchanged providers to preserve their timestamps when updatedAt is omitted',
+    );
+
+    const loaded = await loadTokenProviders({
+      ...process.env,
+      HOME: workspace,
+      XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+      XDG_DATA_HOME: join(workspace, 'xdg-data'),
+    });
+    assert.deepEqual(loaded.providers, initialDefinitions.map((definition) => ({
+      ...definition,
+      updatedAt: new Date(definition.updatedAt).toISOString(),
+    })));
+  } finally {
+    await Promise.allSettled([localVis.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('GET and PUT /api/vis/token-providers/config preserve legacy-read migration and canonical-write semantics', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-config-route-migration-'));
+  const env = {
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    HOME: workspace,
+    XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+  const localVis = await startVisServer(env);
+  const canonicalPath = getTokenProvidersFile(env);
+  const legacyPath = join(env.XDG_DATA_HOME, 'vis', 'token-providers.json');
+  const legacyDefinitions = [
+    {
+      id: 'legacy-codex',
+      name: 'Legacy Codex',
+      command: 'printf "7d | 30%\\n"',
+      updatedAt: '2026-03-19T00:00:00.000Z',
+    },
+  ];
+  const savedDefinitions = [
+    {
+      id: 'codex',
+      name: 'Codex',
+      command: 'printf "30d | 54%\\n"',
+      updatedAt: Date.parse('2026-03-19T00:00:01.000Z'),
+    },
+  ];
+
+  try {
+    await mkdir(join(env.XDG_DATA_HOME, 'vis'), { recursive: true });
+    await writeFile(legacyPath, `${JSON.stringify(legacyDefinitions, null, 2)}\n`, { mode: 0o600 });
+
+    const initialGet = await fetch(`${localVis.origin}/api/vis/token-providers/config`);
+    assert.equal(initialGet.status, 200, 'expected migration-aware config route load to succeed');
+    assert.deepEqual(await initialGet.json(), {
+      definitions: legacyDefinitions.map((definition) => ({
+        ...definition,
+        updatedAt: Date.parse(definition.updatedAt),
+      })),
+    });
+    await assert.rejects(readFile(canonicalPath, 'utf8'), /ENOENT/);
+
+    const putResponse = await fetch(`${localVis.origin}/api/vis/token-providers/config`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ definitions: savedDefinitions }),
+    });
+    assert.equal(putResponse.status, 200, 'expected migration-aware config route save to succeed');
+    assert.deepEqual(await putResponse.json(), { definitions: savedDefinitions });
+
+    const canonicalRaw = await readFile(canonicalPath, 'utf8');
+    const legacyRaw = await readFile(legacyPath, 'utf8');
+    assert.deepEqual(
+      JSON.parse(canonicalRaw),
+      savedDefinitions.map((definition) => ({
+        ...definition,
+        updatedAt: new Date(definition.updatedAt).toISOString(),
+      })),
+      'expected route saves to target canonical config path with normalized timestamps',
+    );
+    assert.deepEqual(
+      JSON.parse(legacyRaw),
+      legacyDefinitions,
+      'expected legacy config file to remain untouched after canonical route save',
+    );
+  } finally {
+    await Promise.allSettled([localVis.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('POST /api/vis/token-providers/test returns draft preview rows without persisting config', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-test-route-'));
+  const env = {
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    HOME: workspace,
+    XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+  const localVis = await startVisServer(env);
+  const requestCount = upstream.requests.length;
+
+  try {
+    const response = await fetch(`${localVis.origin}/api/vis/token-providers/test`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        name: 'Draft provider',
+        command: buildNodeCommand("process.stdout.write('7d | 30%\\n30d | 54%\\n');"),
+      }),
+    });
+
+    assert.equal(response.status, 200, 'expected vis token provider draft test route to exist');
+    assert.deepEqual(await response.json(), {
+      result: {
+        id: 'draft',
+        name: 'Draft provider',
+        status: 'ok',
+        message: 'Provider ready',
+        rows: [
+          { leftText: '7d', rightText: '30%' },
+          { leftText: '30d', rightText: '54%' },
+        ],
+      },
+    });
+
+    const loaded = await loadTokenProviders({
+      ...process.env,
+      HOME: workspace,
+      XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+      XDG_DATA_HOME: join(workspace, 'xdg-data'),
+    });
+    assert.deepEqual(loaded.providers, []);
+    assert.equal(
+      upstream.requests.length,
+      requestCount,
+      'managed vis token provider test route must not proxy upstream requests',
+    );
+  } finally {
+    await Promise.allSettled([localVis.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('POST /api/vis/token-providers/refresh returns ready panel DTOs without command strings', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-refresh-route-'));
+  const markerPath = join(workspace, 'marker.txt');
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+  const localVis = await startVisServer({
+    VIS_MODE: 'managed',
+    VIS_UPSTREAM_URL: upstream.origin,
+    VIS_UPSTREAM_AUTH_HEADER: 'Basic managed-upstream',
+    VIS_EDGE_AUTH_MODE: 'edge',
+    HOME: workspace,
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  });
+  const requestCount = upstream.requests.length;
+
+  try {
+    await saveTokenProviders(
+      [
+        {
+          id: 'first',
+          name: 'First',
+          command: buildNodeCommand(
+            "setTimeout(() => { require('node:fs').writeFileSync(process.argv[1], 'ready'); process.stdout.write('7d | 30%\\n'); }, 50);",
+            markerPath,
+          ),
+          updatedAt: '2026-03-19T00:00:00.000Z',
+        },
+        {
+          id: 'second',
+          name: 'Second',
+          command: buildNodeCommand(
+            "process.stdout.write(`${require('node:fs').existsSync(process.argv[1]) ? 'marker' : 'missing'} | 54%\\n`);",
+            markerPath,
+          ),
+          updatedAt: '2026-03-19T00:00:01.000Z',
+        },
+      ],
+      env,
+    );
+
+    const response = await fetch(`${localVis.origin}/api/vis/token-providers/refresh`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({}),
+    });
+
+    assert.equal(response.status, 200, 'expected vis token provider refresh route to exist');
+    assert.deepEqual(await response.json(), {
+      state: 'ready',
+      message: 'Token providers refreshed',
+      providers: [
+        {
+          id: 'first',
+          name: 'First',
+          status: 'ok',
+          message: 'Provider ready',
+          rows: [{ leftText: '7d', rightText: '30%' }],
+        },
+        {
+          id: 'second',
+          name: 'Second',
+          status: 'ok',
+          message: 'Provider ready',
+          rows: [{ leftText: 'marker', rightText: '54%' }],
+        },
+      ],
+    });
+    assert.equal(
+      upstream.requests.length,
+      requestCount,
+      'managed vis token provider refresh route must not proxy upstream requests',
+    );
+  } finally {
+    await Promise.allSettled([localVis.stop(), rm(workspace, { recursive: true, force: true })]);
+  }
+});
+
+test('token provider config path migration falls back from legacy read and saves only canonical config path', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-config-path-migration-'));
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+  const legacyDefinitions = [
+    {
+      id: 'legacy-codex',
+      name: 'Legacy Codex',
+      command: 'printf "7d | 30%\\n"',
+      updatedAt: '2026-03-19T00:00:00.000Z',
+    },
+  ];
+  const canonicalDefinitions = [
+    {
+      id: 'canonical-codex',
+      name: 'Canonical Codex',
+      command: 'printf "30d | 54%\\n"',
+      updatedAt: '2026-03-19T00:00:01.000Z',
+    },
+  ];
+  const canonicalPath = getTokenProvidersFile(env);
+  const legacyPath = join(env.XDG_DATA_HOME, 'vis', 'token-providers.json');
+
+  try {
+    await mkdir(join(env.XDG_DATA_HOME, 'vis'), { recursive: true });
+    await writeFile(legacyPath, `${JSON.stringify(legacyDefinitions, null, 2)}\n`, { mode: 0o600 });
+
+    const loadedFromLegacy = await loadTokenProviders(env);
+    assert.deepEqual(loadedFromLegacy, {
+      status: 'ok',
+      providers: legacyDefinitions,
+      filePath: canonicalPath,
+    });
+
+    const saved = await saveTokenProviders(canonicalDefinitions, env);
+    const canonicalRaw = await readFile(canonicalPath, 'utf8');
+    const canonicalStat = await stat(canonicalPath);
+    const legacyRaw = await readFile(legacyPath, 'utf8');
+    const loadedCanonical = await loadTokenProviders(env);
+
+    assert.equal(saved.status, 'ok');
+    assert.equal(saved.filePath, canonicalPath);
+    assert.deepEqual(JSON.parse(canonicalRaw), canonicalDefinitions);
+    assert.equal(canonicalStat.mode & 0o777, 0o600);
+    assert.deepEqual(JSON.parse(legacyRaw), legacyDefinitions);
+    assert.deepEqual(loadedCanonical, {
+      status: 'ok',
+      providers: canonicalDefinitions,
+      filePath: canonicalPath,
+    });
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('token provider invalid new config path returns config_error without legacy fallback', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-invalid-new-config-path-'));
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+  const canonicalPath = getTokenProvidersFile(env);
+  const legacyPath = join(env.XDG_DATA_HOME, 'vis', 'token-providers.json');
+  const legacyDefinitions = [
+    {
+      id: 'legacy-codex',
+      name: 'Legacy Codex',
+      command: 'printf "7d | 30%\\n"',
+      updatedAt: '2026-03-19T00:00:00.000Z',
+    },
+  ];
+
+  try {
+    await mkdir(join(env.XDG_CONFIG_HOME, 'vis', 'token'), { recursive: true });
+    await writeFile(canonicalPath, '{not-json}\n', { mode: 0o600 });
+    await mkdir(join(env.XDG_DATA_HOME, 'vis'), { recursive: true });
+    await writeFile(legacyPath, `${JSON.stringify(legacyDefinitions, null, 2)}\n`, { mode: 0o600 });
+
+    const loaded = await loadTokenProviders(env);
+    assert.deepEqual(loaded, {
+      status: 'config_error',
+      providers: [],
+      filePath: canonicalPath,
+    });
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('token provider save writes the exact vis-owned config path with 0600 mode', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-save-'));
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_CONFIG_HOME: join(workspace, 'xdg-config'),
+  };
+  const definitions = [
+    {
+      id: 'codex',
+      name: 'Codex',
+      command: 'printf "7d | 30%\\n"',
+      updatedAt: '2026-03-19T00:00:00.000Z',
+    },
+  ];
+
+  try {
+    const saved = await saveTokenProviders(definitions, env);
+    const filePath = getTokenProvidersFile(env);
+    const loaded = await loadTokenProviders(env);
+    const fileStat = await stat(filePath);
+    const raw = await readFile(filePath, 'utf8');
+
+    assert.equal(saved.status, 'ok');
+    assert.equal(filePath, join(env.XDG_CONFIG_HOME, 'vis', 'token', 'providers.json'));
+    assert.equal(fileStat.mode & 0o777, 0o600);
+    assert.deepEqual(loaded, { status: 'ok', providers: definitions, filePath });
+    assert.deepEqual(JSON.parse(raw), definitions);
+    await assert.rejects(readFile(`${filePath}.tmp`, 'utf8'), /ENOENT/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('token provider parse trims strict left-right rows', () => {
+  assert.deepEqual(parseTokenProviderOutput(' 7d : 2d 1h 02m | 30% \n\n 30d : 12d 04h 10m | 54%  \n'), {
+    status: 'ok',
+    rows: [
+      { leftText: '7d : 2d 1h 02m', rightText: '30%' },
+      { leftText: '30d : 12d 04h 10m', rightText: '54%' },
+    ],
+  });
+});
+
+test('token provider ok refresh runs saved providers sequentially', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-ok-'));
+  const markerPath = join(workspace, 'marker.txt');
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+  const definitions = [
+    {
+      id: 'first',
+      name: 'First',
+      command: buildNodeCommand(
+        "setTimeout(() => { require('node:fs').writeFileSync(process.argv[1], 'ready'); process.stdout.write('7d | 30%\\n'); }, 50);",
+        markerPath,
+      ),
+      updatedAt: '2026-03-19T00:00:00.000Z',
+    },
+    {
+      id: 'second',
+      name: 'Second',
+      command: buildNodeCommand(
+        "process.stdout.write(`${require('node:fs').existsSync(process.argv[1]) ? 'marker' : 'missing'} | 54%\\n`);",
+        markerPath,
+      ),
+      updatedAt: '2026-03-19T00:00:01.000Z',
+    },
+  ];
+
+  try {
+    await saveTokenProviders(definitions, env);
+    const refreshed = await refreshTokenProviders({ env });
+
+    assert.equal(refreshed.status, 'ok');
+    assert.equal(refreshed.providers.length, 2);
+    assert.equal(refreshed.providers[0].status, 'ok');
+    assert.deepEqual(refreshed.providers[0].rows, [{ leftText: '7d', rightText: '30%' }]);
+    assert.equal(refreshed.providers[1].status, 'ok');
+    assert.deepEqual(refreshed.providers[1].rows, [{ leftText: 'marker', rightText: '54%' }]);
+    assert.equal('command' in refreshed.providers[0], false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('token provider invalid blank output returns empty status', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-empty-'));
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+
+  try {
+    const result = await testTokenProvider(
+      {
+        name: 'Codex',
+        command: buildNodeCommand("process.stdout.write('\\n\\n');"),
+      },
+      { env },
+    );
+
+    assert.equal(result.status, 'empty');
+    assert.deepEqual(result.rows, []);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('token provider invalid output rejects malformed rows', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-invalid-'));
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+
+  try {
+    const result = await testTokenProvider(
+      {
+        name: 'Codex',
+        command: buildNodeCommand("process.stdout.write('broken-row\\n');"),
+      },
+      { env },
+    );
+
+    assert.equal(result.status, 'invalid_output');
+    assert.deepEqual(result.rows, []);
+    assert.equal('stderr' in result, false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('token provider timeout returns timed_out deterministically', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-timeout-'));
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+
+  try {
+    const result = await testTokenProvider(
+      {
+        name: 'Codex',
+        command: buildNodeCommand('setTimeout(() => {}, 1000);'),
+      },
+      { env, timeoutMs: 25 },
+    );
+
+    assert.equal(result.status, 'timed_out');
+    assert.deepEqual(result.rows, []);
+    assert.equal('stderr' in result, false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test('token provider oversize output returns error without leaking raw output', async () => {
+  const workspace = await mkdtemp(join(tmpdir(), 'vis-token-provider-oversize-'));
+  const env = {
+    ...process.env,
+    HOME: workspace,
+    XDG_DATA_HOME: join(workspace, 'xdg-data'),
+  };
+
+  try {
+    const result = await testTokenProvider(
+      {
+        name: 'Codex',
+        command: buildNodeCommand("process.stdout.write('x'.repeat(33000));"),
+      },
+      { env },
+    );
+
+    assert.equal(result.status, 'error');
+    assert.deepEqual(result.rows, []);
+    assert.equal('stdout' in result, false);
+    assert.equal('stderr' in result, false);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
   }
 });

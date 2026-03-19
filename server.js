@@ -10,6 +10,13 @@ import { readFile, realpath, stat } from 'node:fs/promises';
 import { basename, dirname, extname, join, relative, resolve } from 'node:path';
 import { Readable } from 'node:stream';
 import { getCodexUsage } from './server/codexUsage.js';
+import {
+  loadTokenProviders,
+  refreshTokenProviders,
+  saveTokenProviders,
+  testTokenProvider,
+  TOKEN_PROVIDER_STATUSES,
+} from './server/visTokenProviders.js';
 
 const app = new Hono();
 const hopByHopHeaders = new Set([
@@ -101,6 +108,195 @@ function jsonErrorResponse(status, error) {
     status,
     headers: { 'Content-Type': 'application/json' },
   });
+}
+
+const tokenProviderConfigInvalidMessage = 'Token provider config is invalid';
+const tokenProviderConfigSaveFailedMessage = 'Token provider config save failed';
+const tokenProviderPanelEmptyMessage = 'No token providers configured';
+const tokenProviderPanelReadyMessage = 'Token providers refreshed';
+
+function parseJsonBody(c) {
+  return c.req.json().catch(() => null);
+}
+
+function parseTokenProviderTimestamp(value) {
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    try {
+      const isoValue = new Date(value).toISOString();
+      return Number.isNaN(Date.parse(isoValue)) ? null : isoValue;
+    } catch {
+      return null;
+    }
+  }
+
+  if (typeof value === 'string' && value.trim()) {
+    const parsed = Date.parse(value);
+    if (Number.isFinite(parsed)) {
+      try {
+        return new Date(parsed).toISOString();
+      } catch {
+        return null;
+      }
+    }
+  }
+
+  return null;
+}
+
+function toTokenProviderConfigDefinition(definition) {
+  const updatedAt = Date.parse(definition.updatedAt);
+  if (!Number.isFinite(updatedAt)) return null;
+  return {
+    id: definition.id,
+    name: definition.name,
+    command: definition.command,
+    updatedAt,
+  };
+}
+
+function toTokenProviderConfigResponse(definitions) {
+  const mappedDefinitions = [];
+  for (const definition of definitions) {
+    const mappedDefinition = toTokenProviderConfigDefinition(definition);
+    if (!mappedDefinition) return null;
+    mappedDefinitions.push(mappedDefinition);
+  }
+  return { definitions: mappedDefinitions };
+}
+
+function toTokenProviderResultBlock(result) {
+  return {
+    id: result.id,
+    name: result.name,
+    status: result.status,
+    message: result.message,
+    rows: result.rows,
+  };
+}
+
+function toTokenProviderSavePayload(body, existingDefinitions = []) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) return null;
+  if (Object.keys(body).length !== 1 || !('definitions' in body) || !Array.isArray(body.definitions)) {
+    return null;
+  }
+
+  const existingDefinitionById = new Map(existingDefinitions.map((definition) => [definition.id, definition]));
+  const fallbackUpdatedAt = new Date().toISOString();
+  const definitions = [];
+  for (const entry of body.definitions) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return null;
+    const entryKeys = Object.keys(entry);
+    const hasUpdatedAt = entryKeys.includes('updatedAt');
+    const expectedKeys = hasUpdatedAt
+      ? ['id', 'name', 'command', 'updatedAt']
+      : ['id', 'name', 'command'];
+    if (entryKeys.length !== expectedKeys.length || expectedKeys.some((key) => !(key in entry))) {
+      return null;
+    }
+
+    const id = typeof entry.id === 'string' ? entry.id.trim() : '';
+    const name = typeof entry.name === 'string' ? entry.name.trim() : '';
+    const command = typeof entry.command === 'string' ? entry.command.trim() : '';
+    if (!id || !name || !command) return null;
+
+    let updatedAt = hasUpdatedAt ? parseTokenProviderTimestamp(entry.updatedAt) : null;
+    if (hasUpdatedAt && !updatedAt) return null;
+    if (!updatedAt) {
+      const existingDefinition = existingDefinitionById.get(id);
+      if (
+        existingDefinition &&
+        existingDefinition.name === name &&
+        existingDefinition.command === command
+      ) {
+        updatedAt = parseTokenProviderTimestamp(existingDefinition.updatedAt);
+      }
+    }
+
+    definitions.push({
+      id,
+      name,
+      command,
+      updatedAt: updatedAt || fallbackUpdatedAt,
+    });
+  }
+
+  return definitions;
+}
+
+async function getManagedTokenProviderConfig(c) {
+  const loaded = await loadTokenProviders(process.env);
+  if (loaded.status === TOKEN_PROVIDER_STATUSES.CONFIG_ERROR) {
+    return jsonErrorResponse(500, tokenProviderConfigInvalidMessage);
+  }
+
+  const payload = toTokenProviderConfigResponse(loaded.providers);
+  if (!payload) {
+    return jsonErrorResponse(500, tokenProviderConfigInvalidMessage);
+  }
+
+  return c.json(payload, 200);
+}
+
+async function putManagedTokenProviderConfig(c) {
+  const body = await parseJsonBody(c);
+  const loaded = await loadTokenProviders(process.env);
+  const definitions = toTokenProviderSavePayload(
+    body,
+    loaded.status === TOKEN_PROVIDER_STATUSES.OK ? loaded.providers : [],
+  );
+  if (!definitions) {
+    return jsonErrorResponse(400, tokenProviderConfigInvalidMessage);
+  }
+
+  const saved = await saveTokenProviders(definitions, process.env);
+  if (saved.status === TOKEN_PROVIDER_STATUSES.CONFIG_ERROR) {
+    return jsonErrorResponse(400, tokenProviderConfigInvalidMessage);
+  }
+  if (saved.status !== TOKEN_PROVIDER_STATUSES.OK) {
+    return jsonErrorResponse(500, tokenProviderConfigSaveFailedMessage);
+  }
+
+  const payload = toTokenProviderConfigResponse(saved.providers);
+  if (!payload) {
+    return jsonErrorResponse(500, tokenProviderConfigInvalidMessage);
+  }
+
+  return c.json(payload, 200);
+}
+
+async function postManagedTokenProviderTest(c) {
+  const body = await parseJsonBody(c);
+  const result = await testTokenProvider(body, { env: process.env });
+  return c.json({ result: toTokenProviderResultBlock(result) }, 200);
+}
+
+function createTokenProviderPanelResponse(refreshed) {
+  if (refreshed.status === TOKEN_PROVIDER_STATUSES.CONFIG_ERROR) {
+    return {
+      state: 'config_error',
+      message: tokenProviderConfigInvalidMessage,
+      providers: [],
+    };
+  }
+
+  if (refreshed.status === TOKEN_PROVIDER_STATUSES.EMPTY) {
+    return {
+      state: 'empty',
+      message: tokenProviderPanelEmptyMessage,
+      providers: [],
+    };
+  }
+
+  return {
+    state: 'ready',
+    message: tokenProviderPanelReadyMessage,
+    providers: refreshed.providers.map((provider) => toTokenProviderResultBlock(provider)),
+  };
+}
+
+async function postManagedTokenProviderRefresh(c) {
+  const refreshed = await refreshTokenProviders({ env: process.env });
+  return c.json(createTokenProviderPanelResponse(refreshed), 200);
 }
 
 function encodeContentDispositionFilename(filename) {
@@ -640,6 +836,10 @@ if (managedConfig) {
     c.header('Cache-Control', 'no-store');
     return c.json(payload, 200);
   });
+  app.get('/api/vis/token-providers/config', (c) => getManagedTokenProviderConfig(c));
+  app.put('/api/vis/token-providers/config', (c) => putManagedTokenProviderConfig(c));
+  app.post('/api/vis/token-providers/test', (c) => postManagedTokenProviderTest(c));
+  app.post('/api/vis/token-providers/refresh', (c) => postManagedTokenProviderRefresh(c));
   app.get('/api/global/event', (c) => relayManagedSseRequest(c, managedConfig));
   app.get('/api/file/content/pdf', (c) => serveLocalPdfFile(c, managedConfig));
   app.get('/api/file/download', (c) => serveManagedDownload(c, managedConfig));

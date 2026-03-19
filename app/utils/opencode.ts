@@ -1,4 +1,11 @@
 import type { CodexUsageResponse } from '../types/codex-usage';
+import type {
+  VisTokenProviderConfigResponse,
+  VisTokenProviderPanelResponse,
+  VisTokenProviderSaveDefinition,
+  VisTokenProviderTestDraft,
+  VisTokenProviderTestResponse,
+} from '../types/vis-token-provider';
 type QueryValue = string | number | boolean | undefined;
 
 type JsonBody = Record<string, unknown> | Array<unknown>;
@@ -95,6 +102,7 @@ async function sendJson(
     method,
     headers: buildHeaders(options.request, 'application/json'),
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
+    signal: options.request?.signal,
   });
   if (!response.ok) throw new Error(`${path} request failed (${response.status})`);
   return parseJson(response);
@@ -134,6 +142,34 @@ export async function getCodexUsage(options?: RequestOptions) {
   if (response.status === 404) return null;
   if (!response.ok) throw new Error(`/codex/usage request failed (${response.status})`);
   return (await parseJson(response)) as CodexUsageResponse;
+}
+
+export function loadVisTokenProviderConfig(options?: RequestOptions) {
+  return getJson('/vis/token-providers/config', undefined, options) as Promise<VisTokenProviderConfigResponse>;
+}
+
+export function saveVisTokenProviderConfig(
+  definitions: VisTokenProviderSaveDefinition[],
+  options?: RequestOptions,
+) {
+  return sendJson('/vis/token-providers/config', 'PUT', {
+    body: { definitions },
+    request: options,
+  }) as Promise<VisTokenProviderConfigResponse>;
+}
+
+export function testVisTokenProviderDraft(draft: VisTokenProviderTestDraft, options?: RequestOptions) {
+  return sendJson('/vis/token-providers/test', 'POST', {
+    body: draft,
+    request: options,
+  }) as Promise<VisTokenProviderTestResponse>;
+}
+
+export function refreshVisTokenProviderPanel(options?: RequestOptions) {
+  return sendJson('/vis/token-providers/refresh', 'POST', {
+    body: {},
+    request: options,
+  }) as Promise<VisTokenProviderPanelResponse>;
 }
 
 export function getPathInfo(options?: RequestOptions) {

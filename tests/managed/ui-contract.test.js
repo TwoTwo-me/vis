@@ -269,7 +269,51 @@ test('tree download affordance skips synthetic nodes and surfaces a managed down
 });
 
 
-test('managed codex usage helper stays on the same-origin /api seam', async () => {
+const TOKEN_PROVIDER_API_BASE = '/api/vis/token-providers';
+const TOKEN_PROVIDER_STABLE_SELECTORS = [
+  'data-testid="token-usage-trigger"',
+  'data-testid="token-usage-panel"',
+  'data-testid="token-provider-block-${id}"',
+  'data-testid="token-provider-row-${id}-${index}"',
+  'data-testid="token-provider-add-action"',
+  'data-testid="token-provider-preset-gallery"',
+  'data-testid="token-provider-preset-card-codex"',
+  'data-testid="token-provider-preset-placeholder"',
+  'data-testid="token-provider-command-input"',
+  'data-testid="token-provider-test-action-${id}"',
+  'data-testid="token-provider-save-action-${id}"',
+  'data-testid="token-provider-reorder-up-action-${id}"',
+  'data-testid="token-provider-reorder-down-action-${id}"',
+  'data-testid="token-provider-delete-action-${id}"',
+  'data-testid="token-provider-delete-confirm-${id}"',
+  'data-testid="token-provider-status-message"',
+];
+
+function escapeRegexLiteral(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+test('managed token provider contract is pinned to dedicated /api/vis/token-providers/* helpers', async () => {
+  const uiContractSource = await readRepoFile('tests/managed/ui-contract.test.js');
+
+  assert.match(
+    uiContractSource,
+    /const TOKEN_PROVIDER_API_BASE = '\/api\/vis\/token-providers';/,
+    'managed UI contract must pin token-provider helpers under /api/vis/token-providers/*',
+  );
+  assert.match(
+    uiContractSource,
+    /managed token provider contract is pinned to dedicated \/api\/vis\/token-providers\/\* helpers/,
+    'managed UI contract must keep an explicit token-provider seam test anchored to /api/vis/token-providers/*',
+  );
+  assert.equal(
+    TOKEN_PROVIDER_API_BASE,
+    '/api/vis/token-providers',
+    'managed UI contract constant must stay pinned to /api/vis/token-providers',
+  );
+});
+
+test('managed token provider helpers use dedicated vis routes and keep top panel fetch-free', async () => {
   const [opencodeSource, topPanelSource, appSource] = await Promise.all([
     readRepoFile('app/utils/opencode.ts'),
     readRepoFile('app/components/TopPanel.vue'),
@@ -278,88 +322,115 @@ test('managed codex usage helper stays on the same-origin /api seam', async () =
 
   assert.match(
     opencodeSource,
-    /createUrl\('\/codex\/usage'\)/,
-    'app/utils/opencode.ts must request the managed codex route through /api/codex/usage',
+    /export function loadVisTokenProviderConfig\(/,
+    'app/utils/opencode.ts must export loadVisTokenProviderConfig()',
   );
   assert.match(
     opencodeSource,
-    /if \(response\.status === 404\) return null;/,
-    'app/utils/opencode.ts must soft-disable the feature on 404',
+    /export function saveVisTokenProviderConfig\(/,
+    'app/utils/opencode.ts must export saveVisTokenProviderConfig()',
   );
+  assert.match(
+    opencodeSource,
+    /export function testVisTokenProviderDraft\(/,
+    'app/utils/opencode.ts must export testVisTokenProviderDraft()',
+  );
+  assert.match(
+    opencodeSource,
+    /export function refreshVisTokenProviderPanel\(/,
+    'app/utils/opencode.ts must export refreshVisTokenProviderPanel()',
+  );
+  assert.match(
+    opencodeSource,
+    /['"`]\/vis\/token-providers\/config['"`]/,
+    'app/utils/opencode.ts must target the vis-owned config route',
+  );
+  assert.match(
+    opencodeSource,
+    /['"`]\/vis\/token-providers\/test['"`]/,
+    'app/utils/opencode.ts must target the vis-owned draft-test route',
+  );
+  assert.match(
+    opencodeSource,
+    /['"`]\/vis\/token-providers\/refresh['"`]/,
+    'app/utils/opencode.ts must target the vis-owned panel refresh route',
+  );
+
   assert.doesNotMatch(
     topPanelSource,
-    /fetch\(.*codex\/usage/s,
-    'TopPanel.vue must stay prop-driven and never fetch codex usage directly',
+    /fetch\(.*(?:token-providers|config\/providers|vis\/token-providers)/s,
+    'TopPanel.vue must stay prop-driven and never fetch token-provider data directly',
   );
   assert.doesNotMatch(
     appSource,
-    /fetch\(.*codex\/usage/s,
-    'App.vue must consume the composable rather than fetching codex usage directly',
+    /fetch\(.*token-providers/s,
+    'App.vue must consume token-provider helpers via a composable instead of direct fetch calls',
   );
 });
 
-test('managed codex quota polling stays non-blocking and visibility-aware', async () => {
-  const [composableSource, appSource] = await Promise.all([
-    readRepoFile('app/composables/useCodexQuota.ts'),
-    readRepoFile('app/App.vue'),
-  ]);
+test('managed token provider selectors are fixed and stable for top panel and settings', async () => {
+  const uiContractSource = await readRepoFile('tests/managed/ui-contract.test.js');
+
+  TOKEN_PROVIDER_STABLE_SELECTORS.forEach((selector) => {
+    assert.match(
+      uiContractSource,
+      new RegExp(escapeRegexLiteral(selector)),
+      `managed UI contract must keep stable selector ${selector}`,
+    );
+  });
+});
+
+test('managed token provider composable owns open-only polling and readonly state', async () => {
+  const composableSource = await readRepoFile('app/composables/useVisTokenProviders.ts');
 
   assert.match(
     composableSource,
-    /document\.addEventListener\('visibilitychange', handleVisibilityChange\)/,
-    'useCodexQuota.ts must refresh when the tab becomes visible again',
+    /const REFRESH_INTERVAL_MS = 60_000;/,
+    'useVisTokenProviders.ts must poll on the exact 60s cadence',
   );
   assert.match(
     composableSource,
-    /AbortController/,
-    'useCodexQuota.ts must cancel in-flight requests before starting another one',
+    /function startRefreshTimer\(\) \{[\s\S]*!enabled\.value \|\| !isPanelOpen\.value[\s\S]*window\.setInterval\([\s\S]*function startOpenPolling\(\) \{[\s\S]*isPanelOpen\.value = true;[\s\S]*void refreshPanel\(\);[\s\S]*startRefreshTimer\(\);/,
+    'useVisTokenProviders.ts must start the refresh loop only when the token panel opens',
   );
   assert.match(
     composableSource,
-    /window\.setInterval\(/,
-    'useCodexQuota.ts must poll on a fixed interval',
+    /function stopOpenPolling\(\) \{[\s\S]*isPanelOpen\.value = false;[\s\S]*clearRefreshTimer\(\);[\s\S]*cancelPanelInFlight\(\);/,
+    'useVisTokenProviders.ts must stop polling and cancel refresh work when the panel closes',
   );
   assert.match(
     composableSource,
-    /if \(!enabled\.value \|\| disabled\.value \|\| loading\.value\) return;/,
-    'useCodexQuota.ts must stop polling once the route is soft-disabled',
+    /watch\(\s*enabled,[\s\S]*if \(!isEnabled\) \{[\s\S]*clearRefreshTimer\(\);[\s\S]*cancelPanelInFlight\(\);[\s\S]*return;[\s\S]*if \(!isPanelOpen\.value\) return;[\s\S]*void refreshPanel\(\);/,
+    'useVisTokenProviders.ts must preserve the UI-ready gate and only resume polling while open',
   );
   assert.match(
-    appSource,
-    /const codexQuotaEnabled = computed\(\(\) => uiInitState\.value === 'ready'\);/,
-    'App.vue must only enable codex polling after the main UI is ready',
+    composableSource,
+    /return \{[\s\S]*definitions: readonly\(definitions\),[\s\S]*configLoading: readonly\(configLoading\),[\s\S]*saving: readonly\(saving\),[\s\S]*draftTestResult: readonly\(draftTestResult\),[\s\S]*panel: readonly\(panel\),[\s\S]*loadConfig,[\s\S]*saveConfig,[\s\S]*testDraft,[\s\S]*refreshPanel,[\s\S]*startOpenPolling,[\s\S]*stopOpenPolling,[\s\S]*\};/,
+    'useVisTokenProviders.ts must expose readonly state and the exact action method seam',
   );
 });
 
-test('managed top panel renders a prop-driven codex quota chip with stable selectors', async () => {
-  const [topPanelSource, appSource] = await Promise.all([
-    readRepoFile('app/components/TopPanel.vue'),
-    readRepoFile('app/App.vue'),
-  ]);
+test('managed token provider external-state settings seams keep preset insertion and ordered saves in App.vue', async () => {
+  const appSource = await readRepoFile('app/App.vue');
 
   assert.match(
-    topPanelSource,
-    /data-testid="codex-quota-chip"/,
-    'TopPanel.vue must expose a stable selector for the codex quota chip',
-  );
-  assert.match(
-    topPanelSource,
-    /data-testid="codex-quota-window-5h"/,
-    'TopPanel.vue must expose a stable selector for the 5h quota segment',
-  );
-  assert.match(
-    topPanelSource,
-    /@media \(max-width: 1100px\)/,
-    'TopPanel.vue must hide the codex chip on narrow layouts',
+    appSource,
+    /:token-provider-definitions="settingsTokenProviderDefinitions"[\s\S]*:token-provider-saved-definitions="savedTokenProviderDefinitions"[\s\S]*:selected-token-provider-id="selectedTokenProviderId"[\s\S]*@token-provider-preset-select="handleTokenProviderPresetSelect"[\s\S]*@token-provider-save="handleTokenProviderSave"/,
+    'App.vue must keep SettingsModal wired to external token-provider state and preset/save seams',
   );
   assert.match(
     appSource,
-    /:codex-quota="codexQuotaValue"/,
-    'App.vue must pass quota data into TopPanel via props',
+    /function handleTokenProviderPresetSelect\(presetId: string\) \{[\s\S]*createTokenProviderPresetDraft\(presetId\)[\s\S]*replaceSettingsTokenProviderDefinitions\(\[[\s\S]*\.\.\.settingsTokenProviderDefinitions\.value,[\s\S]*buildWorkingTokenProviderDefinition\(nextDraft\),[\s\S]*\]\);[\s\S]*selectedTokenProviderId\.value = nextDraft\.id;[\s\S]*setTokenProviderDraft\(nextDraft\);[\s\S]*tokenProviderCommandFocusRequest\.value \+= 1;/,
+    'App.vue preset handler must append the next working definition, select it, and request command focus',
   );
   assert.match(
     appSource,
-    /:codex-quota-state="codexQuotaState"/,
-    'App.vue must pass quota UI state into TopPanel via props',
+    /async function handleTokenProviderSave\(definitions: VisTokenProviderDraft\[\]\) \{[\s\S]*saveConfig\(definitions\)[\s\S]*replaceSavedTokenProviderDefinitions\(savedDefinitions\);[\s\S]*replaceSettingsTokenProviderDefinitions\(savedDefinitions\);[\s\S]*syncSettingsTokenProviderSelection\(preferredProviderId\);/,
+    'App.vue save handler must preserve ordered external-state definitions and keep selection stable after save',
+  );
+  assert.match(
+    appSource,
+    /watch\([\s\S]*isSettingsOpen,[\s\S]*const definitions = await tokenProviders\.loadConfig\(\);[\s\S]*replaceSavedTokenProviderDefinitions\(definitions\);[\s\S]*replaceSettingsTokenProviderDefinitions\(definitions\);[\s\S]*syncSettingsTokenProviderSelection\(selectedTokenProviderId\.value\);/,
+    'App.vue settings-open seam must continue hydrating external token-provider state from managed config loads',
   );
 });

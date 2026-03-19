@@ -10,8 +10,10 @@
           :active-directory="activeDirectory"
           :selected-session-id="selectedSessionId"
           :home-path="homePath"
-          :codex-quota="codexQuotaValue"
-          :codex-quota-state="codexQuotaState"
+          :token-provider-panel="tokenProviderPanel"
+          :token-provider-panel-loading="tokenProviderPanelLoading"
+          :token-provider-panel-error="tokenProviderPanelError"
+          :token-provider-panel-enabled="tokenProviderPanelEnabled"
           @select-notification="handleNotificationSessionSelect"
           @create-worktree-from="createWorktreeFromWorktree"
           @new-session="createNewSession"
@@ -23,7 +25,8 @@
           @select-session="handleTopPanelSessionSelect"
           @open-directory="openProjectPicker"
           @edit-project="handleEditProject"
-          @open-settings="isSettingsOpen = true"
+          @open-settings="openSettings"
+          @token-usage-open-change="isTokenProviderPanelOpen = $event"
           @dropdown-closed="focusInput"
         />
       </header>
@@ -229,7 +232,26 @@
       @close="isProjectPickerOpen = false"
       @select="handleProjectDirectorySelect"
     />
-    <SettingsModal :open="isSettingsOpen" @close="isSettingsOpen = false" />
+    <SettingsModal
+      :open="isSettingsOpen"
+      :token-provider-definitions="settingsTokenProviderDefinitions"
+      :token-provider-saved-definitions="savedTokenProviderDefinitions"
+      :selected-token-provider-id="selectedTokenProviderId"
+      :token-provider-draft="tokenProviderDraft"
+      :token-provider-preview="tokenProviderPreview"
+      :token-provider-command-focus-request="tokenProviderCommandFocusRequest"
+      :token-provider-busy="tokenProviderBusy"
+      :token-provider-status-message="tokenProviderStatusMessage"
+      :token-provider-section-enabled="tokenProviderSectionEnabled"
+      @close="handleSettingsClose"
+      @token-provider-preset-select="handleTokenProviderPresetSelect"
+      @token-provider-select="handleTokenProviderSelect"
+      @token-provider-change="handleTokenProviderChange"
+      @token-provider-delete="handleTokenProviderDelete"
+      @token-provider-move="handleTokenProviderMove"
+      @token-provider-test="handleTokenProviderTest"
+      @token-provider-save="handleTokenProviderSave"
+    />
     <ProjectSettingsDialog
       :open="!!editingProject"
       :project-id="editingProject?.projectId ?? ''"
@@ -296,15 +318,20 @@ import { useTodos, type TodoItem } from './composables/useTodos';
 import { useDeltaAccumulator } from './composables/useDeltaAccumulator';
 import { useGlobalEvents } from './composables/useGlobalEvents';
 import { useMessages } from './composables/useMessages';
-import { useCodexQuota } from './composables/useCodexQuota';
 import { useOpenCodeApi } from './composables/useOpenCodeApi';
 import { useReasoningWindows } from './composables/useReasoningWindows';
 import { useServerState } from './composables/useServerState';
 import { useSessionSelection } from './composables/useSessionSelection';
 import { useSubagentWindows } from './composables/useSubagentWindows';
+import { useVisTokenProviders } from './composables/useVisTokenProviders';
 import { renderWorkerHtml } from './utils/workerRenderer';
 import type { MessagePart, ReasoningPart, ToolPart } from './types/sse';
-import type { CodexUsageResponse } from './types/codex-usage';
+import type {
+  VisTokenProviderDefinition,
+  VisTokenProviderDraft,
+  VisTokenProviderResultBlock,
+  VisTokenProviderTestDraft,
+} from './types/vis-token-provider';
 import { resolveProjectColorHex } from './utils/stateBuilder';
 import {
   extractFileRead as extractToolFileRead,
@@ -946,6 +973,14 @@ const editingProjectMeta = computed(() => {
   return pid ? serverState.projects[pid] : undefined;
 });
 const isSettingsOpen = ref(false);
+const savedTokenProviderDefinitions = ref<VisTokenProviderDefinition[]>([]);
+const settingsTokenProviderDefinitions = ref<VisTokenProviderDefinition[]>([]);
+const selectedTokenProviderId = ref('');
+const tokenProviderDraft = ref<VisTokenProviderDraft | null>(null);
+const tokenProviderCommandFocusRequest = ref(0);
+const tokenProviderPreviewKey = ref('');
+const isTokenProviderPanelOpen = ref(false);
+let tokenProviderConfigRequestId = 0;
 const selectedMode = ref('build');
 const selectedModel = ref('');
 const selectedThinking = ref<string | undefined>(undefined);
@@ -975,15 +1010,40 @@ const retryStatus = ref<{
   attempt: number;
 } | null>(null);
 
-const codexQuotaEnabled = computed(() => uiInitState.value === 'ready');
-const codexQuota = useCodexQuota(codexQuotaEnabled);
-const codexQuotaValue = computed<CodexUsageResponse | null>(() => codexQuota.quota.value);
-const codexQuotaState = computed<'hidden' | 'loading' | 'ready' | 'error'>(() => {
-  if (codexQuota.disabled.value) return 'hidden';
-  if (codexQuota.loading.value && !codexQuota.quota.value) return 'loading';
-  if (codexQuota.error.value && !codexQuota.quota.value) return 'error';
-  if (codexQuota.quota.value) return 'ready';
-  return 'hidden';
+const tokenProviderEnabled = computed(() => uiInitState.value === 'ready');
+const tokenProviders = useVisTokenProviders(tokenProviderEnabled);
+const tokenProviderBusy = computed(
+  () =>
+    tokenProviders.configLoading.value || tokenProviders.saving.value || tokenProviders.draftTesting.value,
+);
+const tokenProviderStatusMessage = computed(
+  () => tokenProviders.saveError.value || tokenProviders.configError.value || '',
+);
+const tokenProviderPanel = computed(() => tokenProviders.panel.value);
+const tokenProviderPanelLoading = computed(() => tokenProviders.panelLoading.value);
+const tokenProviderPanelError = computed(() => tokenProviders.panelError.value);
+const tokenProviderPanelEnabled = computed(() => uiInitState.value === 'ready');
+const tokenProviderSectionEnabled = computed(() => uiInitState.value === 'ready');
+const tokenProviderPreview = computed<VisTokenProviderResultBlock | null>(() => {
+  const draft = tokenProviderDraft.value;
+  if (!draft) return null;
+  const previewKey = buildTokenProviderPreviewKey(draft);
+  if (!previewKey || previewKey !== tokenProviderPreviewKey.value) return null;
+  if (tokenProviders.draftTestError.value) {
+    return {
+      id: 'draft',
+      name: draft.name,
+      status: 'error',
+      message: tokenProviders.draftTestError.value,
+      rows: [],
+    };
+  }
+  const result = tokenProviders.draftTestResult.value;
+  if (!result) return null;
+  return {
+    ...result,
+    name: draft.name,
+  };
 });
 
 const statusText = computed(() => {
@@ -1413,6 +1473,144 @@ function validateSelectedSession() {
 function toErrorMessage(error: unknown) {
   if (error instanceof Error) return error.message;
   return String(error);
+}
+
+function cloneTokenProviderDefinition(
+  definition: VisTokenProviderDefinition,
+): VisTokenProviderDefinition {
+  return {
+    id: definition.id,
+    name: definition.name,
+    command: definition.command,
+    updatedAt: definition.updatedAt,
+  };
+}
+
+function cloneTokenProviderDraft(draft: VisTokenProviderDraft): VisTokenProviderDraft {
+  return {
+    id: draft.id,
+    name: draft.name,
+    command: draft.command,
+  };
+}
+
+function replaceSettingsTokenProviderDefinitions(definitions: VisTokenProviderDefinition[]) {
+  settingsTokenProviderDefinitions.value = definitions.map((definition) =>
+    cloneTokenProviderDefinition(definition),
+  );
+}
+
+function replaceSavedTokenProviderDefinitions(definitions: VisTokenProviderDefinition[]) {
+  savedTokenProviderDefinitions.value = definitions.map((definition) =>
+    cloneTokenProviderDefinition(definition),
+  );
+}
+
+function findSettingsTokenProviderDefinition(providerId: string) {
+  const normalizedProviderId = providerId.trim();
+  if (!normalizedProviderId) return null;
+  return (
+    settingsTokenProviderDefinitions.value.find((definition) => definition.id === normalizedProviderId) ?? null
+  );
+}
+
+function buildTokenProviderPreviewKey(draft: Pick<VisTokenProviderDraft, 'name' | 'command'>) {
+  return `${draft.name.trim()}\n${draft.command.trim()}`;
+}
+
+function clearTokenProviderPreview() {
+  tokenProviderPreviewKey.value = '';
+}
+
+function setTokenProviderDraft(nextDraft: VisTokenProviderDraft | null) {
+  tokenProviderDraft.value = nextDraft ? cloneTokenProviderDraft(nextDraft) : null;
+  clearTokenProviderPreview();
+}
+
+function buildWorkingTokenProviderDefinition(draft: VisTokenProviderDraft) {
+  const existingDefinition = settingsTokenProviderDefinitions.value.find((definition) => definition.id === draft.id);
+  const savedDefinition = savedTokenProviderDefinitions.value.find((definition) => definition.id === draft.id);
+  return {
+    id: draft.id,
+    name: draft.name,
+    command: draft.command,
+    updatedAt: existingDefinition?.updatedAt ?? savedDefinition?.updatedAt ?? Date.now(),
+  };
+}
+
+function selectSettingsTokenProvider(providerId: string) {
+  const normalizedProviderId = providerId.trim();
+  selectedTokenProviderId.value = normalizedProviderId;
+  const definition = findSettingsTokenProviderDefinition(normalizedProviderId);
+  if (!definition) {
+    if (tokenProviderDraft.value?.id !== normalizedProviderId) {
+      setTokenProviderDraft(null);
+    }
+    return;
+  }
+  setTokenProviderDraft({
+    id: definition.id,
+    name: definition.name,
+    command: definition.command,
+  });
+}
+
+function syncSettingsTokenProviderSelection(preferredProviderId?: string) {
+  const normalizedPreferredId = preferredProviderId?.trim() ?? '';
+  const nextSelectedId =
+    normalizedPreferredId && findSettingsTokenProviderDefinition(normalizedPreferredId)
+      ? normalizedPreferredId
+      : settingsTokenProviderDefinitions.value[0]?.id ?? '';
+  if (!nextSelectedId) {
+    selectedTokenProviderId.value = '';
+    setTokenProviderDraft(null);
+    return;
+  }
+  selectSettingsTokenProvider(nextSelectedId);
+}
+
+function createTokenProviderId(name: string) {
+  const baseId =
+    name
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-+|-+$/g, '') || 'provider';
+  const existingIds = new Set(
+    settingsTokenProviderDefinitions.value.map((definition) => definition.id),
+  );
+  if (!existingIds.has(baseId)) return baseId;
+  let suffix = 2;
+  while (existingIds.has(`${baseId}-${suffix}`)) {
+    suffix += 1;
+  }
+  return `${baseId}-${suffix}`;
+}
+
+function createTokenProviderSeed() {
+  const existingIds = new Set(settingsTokenProviderDefinitions.value.map((definition) => definition.id));
+  for (let index = 1; index <= 21; index += 1) {
+    const name = index === 1 ? 'Codex' : `Codex ${index}`;
+    const id =
+      name
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '') || 'provider';
+    if (!existingIds.has(id)) {
+      return { id, name, command: '' };
+    }
+  }
+  return {
+    id: createTokenProviderId(`Codex ${settingsTokenProviderDefinitions.value.length + 1}`),
+    name: `Codex ${settingsTokenProviderDefinitions.value.length + 1}`,
+    command: '',
+  };
+}
+
+function createTokenProviderPresetDraft(presetId: string) {
+  if (presetId === 'codex') return createTokenProviderSeed();
+  return null;
 }
 
 function isManagedFailure(value: unknown): value is ManagedFailure {
@@ -2250,6 +2448,106 @@ async function fetchHomePath() {
   } catch {
     return;
   }
+}
+
+function openSettings() {
+  isSettingsOpen.value = true;
+}
+
+function handleSettingsClose() {
+  isSettingsOpen.value = false;
+  savedTokenProviderDefinitions.value = [];
+  selectedTokenProviderId.value = '';
+  settingsTokenProviderDefinitions.value = [];
+  tokenProviderCommandFocusRequest.value = 0;
+  setTokenProviderDraft(null);
+  clearTokenProviderPreview();
+}
+
+function handleTokenProviderPresetSelect(presetId: string) {
+  const nextDraft = createTokenProviderPresetDraft(presetId);
+  if (!nextDraft) return;
+  replaceSettingsTokenProviderDefinitions([
+    ...settingsTokenProviderDefinitions.value,
+    buildWorkingTokenProviderDefinition(nextDraft),
+  ]);
+  selectedTokenProviderId.value = nextDraft.id;
+  setTokenProviderDraft(nextDraft);
+  tokenProviderCommandFocusRequest.value += 1;
+}
+
+function handleTokenProviderSelect(providerId: string) {
+  selectSettingsTokenProvider(providerId);
+}
+
+function handleTokenProviderChange(draft: VisTokenProviderDraft) {
+  const nextDefinition = buildWorkingTokenProviderDefinition(draft);
+  const existingIndex = settingsTokenProviderDefinitions.value.findIndex(
+    (definition) => definition.id === draft.id,
+  );
+  const nextDefinitions = settingsTokenProviderDefinitions.value.slice();
+  if (existingIndex >= 0) {
+    nextDefinitions.splice(existingIndex, 1, nextDefinition);
+  } else {
+    nextDefinitions.push(nextDefinition);
+  }
+  replaceSettingsTokenProviderDefinitions(nextDefinitions);
+  selectedTokenProviderId.value = draft.id;
+  setTokenProviderDraft(draft);
+}
+
+function handleTokenProviderDelete(providerId: string) {
+  const normalizedProviderId = providerId.trim();
+  if (!normalizedProviderId) return;
+  const existingIndex = settingsTokenProviderDefinitions.value.findIndex(
+    (definition) => definition.id === normalizedProviderId,
+  );
+  if (existingIndex < 0) {
+    if (tokenProviderDraft.value?.id === normalizedProviderId) {
+      selectedTokenProviderId.value = '';
+      setTokenProviderDraft(null);
+    }
+    return;
+  }
+  const nextDefinitions = settingsTokenProviderDefinitions.value.slice();
+  nextDefinitions.splice(existingIndex, 1);
+  replaceSettingsTokenProviderDefinitions(nextDefinitions);
+  if (selectedTokenProviderId.value === normalizedProviderId) {
+    const fallback = nextDefinitions[existingIndex] ?? nextDefinitions[existingIndex - 1] ?? null;
+    if (fallback) {
+      selectSettingsTokenProvider(fallback.id);
+    } else {
+      selectedTokenProviderId.value = '';
+      setTokenProviderDraft(null);
+    }
+  }
+}
+
+function handleTokenProviderMove(payload: { id: string; direction: 'up' | 'down' }) {
+  const currentIndex = settingsTokenProviderDefinitions.value.findIndex(
+    (definition) => definition.id === payload.id,
+  );
+  if (currentIndex < 0) return;
+  const targetIndex = payload.direction === 'up' ? currentIndex - 1 : currentIndex + 1;
+  if (targetIndex < 0 || targetIndex >= settingsTokenProviderDefinitions.value.length) return;
+  const nextDefinitions = settingsTokenProviderDefinitions.value.slice();
+  const [movedDefinition] = nextDefinitions.splice(currentIndex, 1);
+  nextDefinitions.splice(targetIndex, 0, movedDefinition);
+  replaceSettingsTokenProviderDefinitions(nextDefinitions);
+}
+
+async function handleTokenProviderTest(draft: VisTokenProviderTestDraft) {
+  tokenProviderPreviewKey.value = buildTokenProviderPreviewKey(draft);
+  await tokenProviders.testDraft(draft);
+}
+
+async function handleTokenProviderSave(definitions: VisTokenProviderDraft[]) {
+  const preferredProviderId = tokenProviderDraft.value?.id || selectedTokenProviderId.value;
+  const savedDefinitions = await tokenProviders.saveConfig(definitions);
+  if (tokenProviders.saveError.value) return;
+  replaceSavedTokenProviderDefinitions(savedDefinitions);
+  replaceSettingsTokenProviderDefinitions(savedDefinitions);
+  syncSettingsTokenProviderSelection(preferredProviderId);
 }
 
 function handleEditProject(payload: { projectId: string; worktree: string }) {
@@ -4033,6 +4331,36 @@ watch(
       inputPanelRef.value?.focus();
       void restoreShellSessions();
     });
+  },
+  { immediate: true },
+);
+
+watch(
+  isSettingsOpen,
+  async (open) => {
+    if (!open) {
+      tokenProviderConfigRequestId += 1;
+      clearTokenProviderPreview();
+      return;
+    }
+    const requestId = ++tokenProviderConfigRequestId;
+    const definitions = await tokenProviders.loadConfig();
+    if (!isSettingsOpen.value || requestId !== tokenProviderConfigRequestId) return;
+    replaceSavedTokenProviderDefinitions(definitions);
+    replaceSettingsTokenProviderDefinitions(definitions);
+    syncSettingsTokenProviderSelection(selectedTokenProviderId.value);
+  },
+  { immediate: true },
+);
+
+watch(
+  isTokenProviderPanelOpen,
+  (open) => {
+    if (open) {
+      tokenProviders.startOpenPolling();
+      return;
+    }
+    tokenProviders.stopOpenPolling();
   },
   { immediate: true },
 );
