@@ -15,6 +15,7 @@ const props = defineProps<{
 const emit = defineEmits<{
   focus: [key: string];
   close: [key: string];
+  minimize: [key: string];
 }>();
 
 const windowEl = ref<HTMLElement>();
@@ -139,6 +140,10 @@ function onFocus() {
 
 function onClose() {
   emit('close', props.entry.key);
+}
+
+function onMinimize() {
+  emit('minimize', props.entry.key);
 }
 
 function onBodyClick() {
@@ -269,7 +274,7 @@ function getDragBounds() {
 }
 
 function onDragStart(e: PointerEvent) {
-  if ((e.target as HTMLElement).closest('.close-btn')) return;
+  if ((e.target as HTMLElement).closest('.titlebar-action-btn')) return;
   e.preventDefault();
   cancelSnapAnimation();
 
@@ -441,7 +446,25 @@ function onResizeEnd(e: PointerEvent) {
   >
     <div class="floating-window-titlebar" @pointerdown="onDragStart">
       <span class="title">{{ entry.title || 'Tool' }}</span>
-      <button v-if="entry.closable" class="close-btn" @click.stop="onClose">×</button>
+      <div class="titlebar-actions">
+        <button
+          v-if="entry.closable"
+          class="titlebar-action-btn close-btn"
+          type="button"
+          @click.stop="onClose"
+        >
+          ×
+        </button>
+        <button
+          v-if="entry.minimizable"
+          class="titlebar-action-btn minimize-btn"
+          type="button"
+          data-testid="floating-window-minimize"
+          @click.stop="onMinimize"
+        >
+          -
+        </button>
+      </div>
     </div>
     <div class="floating-window-body-wrapper">
       <div
@@ -563,17 +586,30 @@ function onResizeEnd(e: PointerEvent) {
   text-overflow: ellipsis;
 }
 
-.close-btn {
+.titlebar-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+
+.titlebar-action-btn {
   background: transparent;
   border: none;
   color: inherit;
-  font-size: 16px;
   cursor: pointer;
   padding: 0 4px;
   line-height: 1;
 }
 
-.close-btn:hover {
+.close-btn {
+  font-size: 16px;
+}
+
+.minimize-btn {
+  font-size: 15px;
+}
+
+.titlebar-action-btn:hover {
   opacity: 0.8;
 }
 
