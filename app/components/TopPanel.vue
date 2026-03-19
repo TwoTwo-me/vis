@@ -263,48 +263,112 @@
         >
           <Icon icon="lucide:terminal" :width="16" :height="16" />
         </button>
+        <Dropdown
+          v-if="props.tokenProviderPanelEnabled"
+          v-model:open="tokenUsageOpen"
+          class="token-usage-dropdown-root"
+          auto-close
+          :popup-style="{ minWidth: '360px', width: 'min(440px, 92vw)', maxWidth: '92vw' }"
+        >
+          <template #trigger>
+            <button
+              type="button"
+              class="control-button token-usage-button"
+              data-testid="token-usage-trigger"
+              title="Token usage"
+              @click.stop="tokenUsageOpen = !tokenUsageOpen"
+            >
+              <Icon icon="lucide:coins" class="token-usage-glyph" :width="20" :height="20" />
+            </button>
+          </template>
+          <template #default>
+            <div class="token-usage-panel" data-testid="token-usage-panel">
+              <div class="token-usage-panel-header">
+                <span class="token-usage-label">Token usage</span>
+              </div>
+              <div class="token-usage-panel-body">
+                <div
+                  v-if="tokenProviderPanelState === 'loading'"
+                  class="token-provider-panel-state"
+                  data-testid="token-provider-panel-state-loading"
+                >
+                  <span class="token-provider-panel-copy">Loading token providers...</span>
+                </div>
+                <div
+                  v-else-if="tokenProviderPanelState === 'empty'"
+                  class="token-provider-panel-state"
+                  data-testid="token-provider-panel-state-empty"
+                >
+                  <span class="token-provider-panel-copy">{{ tokenProviderPanelMessage }}</span>
+                  <button
+                    type="button"
+                    class="token-provider-panel-cta"
+                    data-testid="token-provider-panel-settings-cta"
+                    @click="handleOpenSettingsFromTokenPanel"
+                  >
+                    Settings
+                  </button>
+                </div>
+                <div
+                  v-else-if="tokenProviderPanelState === 'config_error'"
+                  class="token-provider-panel-state"
+                  data-testid="token-provider-panel-state-config-error"
+                >
+                  <span class="token-provider-panel-copy">{{ tokenProviderPanelMessage }}</span>
+                  <button
+                    type="button"
+                    class="token-provider-panel-cta"
+                    data-testid="token-provider-panel-settings-cta"
+                    @click="handleOpenSettingsFromTokenPanel"
+                  >
+                    Settings
+                  </button>
+                </div>
+                <div
+                  v-else-if="tokenProviderPanelState === 'refresh_error'"
+                  class="token-provider-panel-state"
+                  data-testid="token-provider-panel-state-refresh-error"
+                >
+                  <span class="token-provider-panel-copy">{{ tokenProviderPanelMessage }}</span>
+                </div>
+                <div v-else class="token-provider-stack">
+                  <section
+                    v-for="provider in tokenProviderBlocks"
+                    :key="provider.id"
+                    class="token-provider-block"
+                    :class="`is-${provider.status}`"
+                    :data-testid="`token-provider-block-${provider.id}`"
+                  >
+                    <header class="token-provider-block-header">
+                      <span class="token-provider-name">{{ provider.name }}</span>
+                      <span class="token-provider-state-chip">{{ formatTokenProviderStatus(provider.status) }}</span>
+                    </header>
+                    <div v-if="provider.rows.length > 0" class="token-provider-rows">
+                      <div
+                        v-for="(row, index) in provider.rows"
+                        :key="`${provider.id}-${index}`"
+                        class="token-provider-row"
+                        :data-testid="`token-provider-row-${provider.id}-${index}`"
+                      >
+                        <span class="token-provider-row-left">{{ row.leftText }}</span>
+                        <span class="token-provider-row-right">{{ row.rightText }}</span>
+                      </div>
+                    </div>
+                    <p
+                      v-else
+                      class="token-provider-status-copy"
+                      :data-testid="`token-provider-status-${provider.id}`"
+                    >
+                      {{ provider.message }}
+                    </p>
+                  </section>
+                </div>
+              </div>
+            </div>
+          </template>
+        </Dropdown>
       </div>
       <div class="top-right">
-        <div
-          v-if="props.codexQuotaState !== 'hidden'"
-          class="codex-quota-chip"
-          data-testid="codex-quota-chip"
-        >
-          <span class="codex-quota-label">Codex</span>
-          <template v-if="props.codexQuotaState === 'loading'">
-            <span class="codex-quota-placeholder">...</span>
-          </template>
-          <template v-else-if="props.codexQuotaState === 'error' || props.codexQuota?.state === 'unavailable'">
-            <span class="codex-quota-fallback">unavailable</span>
-          </template>
-          <template v-else-if="props.codexQuota?.state === 'login_required'">
-            <span class="codex-quota-fallback">login</span>
-          </template>
-          <template v-else-if="props.codexQuota">
-            <span
-              class="codex-quota-window"
-              :class="{ 'is-alert': props.codexQuota.windows.fiveHour.alert }"
-              data-testid="codex-quota-window-5h"
-            >
-              {{ props.codexQuota.windows.fiveHour.label }} {{ props.codexQuota.windows.fiveHour.remainingPercent ?? '?' }}% {{ props.codexQuota.windows.fiveHour.remainingText }}
-            </span>
-            <span
-              class="codex-quota-window"
-              :class="{ 'is-alert': props.codexQuota.windows.sevenDay.alert }"
-              data-testid="codex-quota-window-7d"
-            >
-              {{ props.codexQuota.windows.sevenDay.label }} {{ props.codexQuota.windows.sevenDay.remainingPercent ?? '?' }}% {{ props.codexQuota.windows.sevenDay.remainingText }}
-            </span>
-            <span
-              class="codex-quota-window"
-              :class="{ 'is-alert': props.codexQuota.windows.tools30Day.alert }"
-              data-testid="codex-quota-window-30d"
-            >
-              {{ props.codexQuota.windows.tools30Day.label }} {{ props.codexQuota.windows.tools30Day.remainingPercent ?? '?' }}% {{ props.codexQuota.windows.tools30Day.remainingText }}
-            </span>
-            <span v-if="props.codexQuota.stale" class="codex-quota-stale">stale {{ props.codexQuota.staleMinutes }}m</span>
-          </template>
-        </div>
         <a
           href="https://github.com/xenodrive/vis/"
           target="_blank"
@@ -344,7 +408,11 @@
 <script setup lang="ts">
 import { computed, ref, watch, onBeforeUnmount, onMounted } from 'vue';
 import { Icon } from '@iconify/vue';
-import type { CodexUsageResponse } from '../types/codex-usage';
+import type {
+  VisTokenProviderPanelResponse,
+  VisTokenProviderResultBlock,
+  VisTokenProviderResultStatus,
+} from '../types/vis-token-provider';
 import Dropdown from './Dropdown.vue';
 import DropdownItem from './Dropdown/Item.vue';
 import DropdownSearch from './Dropdown/Search.vue';
@@ -397,8 +465,10 @@ const props = defineProps<{
   activeDirectory: string;
   selectedSessionId: string;
   homePath?: string;
-  codexQuota?: CodexUsageResponse | null;
-  codexQuotaState?: 'hidden' | 'loading' | 'ready' | 'error';
+  tokenProviderPanel?: VisTokenProviderPanelResponse | null;
+  tokenProviderPanelLoading?: boolean;
+  tokenProviderPanelError?: string;
+  tokenProviderPanelEnabled?: boolean;
 }>();
 
 const notifications = computed(() => props.notificationSessions ?? []);
@@ -419,11 +489,13 @@ const emit = defineEmits<{
   (event: 'open-shell'): void;
   (event: 'edit-project', payload: { projectId: string; worktree: string }): void;
   (event: 'open-settings'): void;
+  (event: 'token-usage-open-change', value: boolean): void;
   (event: 'dropdown-closed'): void;
 }>();
 
 const menuOpen = ref(false);
 const treeDropdownOpen = ref(false);
+const tokenUsageOpen = ref(false);
 
 watch(treeDropdownOpen, (open) => {
   if (open) {
@@ -431,6 +503,54 @@ watch(treeDropdownOpen, (open) => {
   }
   if (!open) emit('dropdown-closed');
 });
+
+watch(tokenUsageOpen, (open) => {
+  emit('token-usage-open-change', open);
+});
+
+const tokenProviderBlocks = computed<VisTokenProviderResultBlock[]>(() => {
+  return (props.tokenProviderPanel?.providers ?? []).map((provider) => ({
+    ...provider,
+    id: provider.id.trim(),
+    name: provider.name.trim() || provider.id.trim(),
+    message: provider.message.trim(),
+    rows: provider.rows.map((row) => ({
+      leftText: row.leftText.trim(),
+      rightText: row.rightText.trim(),
+    })),
+  }));
+});
+
+const tokenProviderPanelState = computed(() => {
+  if (props.tokenProviderPanelLoading && !props.tokenProviderPanel) return 'loading';
+  if (props.tokenProviderPanel?.state === 'empty') return 'empty';
+  if (props.tokenProviderPanel?.state === 'config_error') return 'config_error';
+  if (tokenProviderBlocks.value.length > 0) return 'ready';
+  if (props.tokenProviderPanelError?.trim()) return 'refresh_error';
+  return 'loading';
+});
+
+const tokenProviderPanelMessage = computed(() => {
+  if (tokenProviderPanelState.value === 'empty') {
+    return props.tokenProviderPanel?.message.trim() || 'No token providers configured';
+  }
+  if (tokenProviderPanelState.value === 'config_error') {
+    return props.tokenProviderPanel?.message.trim() || 'Token provider config is invalid';
+  }
+  if (tokenProviderPanelState.value === 'refresh_error') {
+    return props.tokenProviderPanelError?.trim() || 'Token provider refresh failed.';
+  }
+  return '';
+});
+
+function formatTokenProviderStatus(status: VisTokenProviderResultStatus) {
+  return status.replace(/_/g, ' ');
+}
+
+function handleOpenSettingsFromTokenPanel() {
+  tokenUsageOpen.value = false;
+  emit('open-settings');
+}
 
 function openSessionDropdown() {
   treeDropdownOpen.value = true;
@@ -738,36 +858,218 @@ function handleOpenDirectory(close: () => void) {
   align-items: center;
 }
 
-.codex-quota-chip {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 32px;
-  padding: 0 10px;
-  border: 1px solid #334155;
-  border-radius: 999px;
-  background: #0b1320;
-  color: #cbd5e1;
-  font-size: 11px;
-  line-height: 1;
-  white-space: nowrap;
-}
-
-.codex-quota-label {
+.token-usage-label {
   color: #94a3b8;
+  font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-.codex-quota-window.is-alert,
-.codex-quota-stale,
-.codex-quota-fallback {
+.token-usage-dropdown-root {
+  flex: 0 0 auto;
+}
+
+.token-usage-button {
+  width: 32px;
+  height: 32px;
+  flex-shrink: 0;
+  padding: 0;
+  justify-content: center;
+  color: #fbbf24;
+}
+
+.token-usage-button:hover {
+  background: #1d2a45;
+}
+
+.token-usage-glyph {
+  width: 20px;
+  height: 20px;
+}
+
+.token-usage-panel {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 6px;
+}
+
+.token-usage-panel-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.token-usage-panel-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 10px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #cbd5e1;
+}
+
+.token-provider-panel-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  min-width: 0;
+  gap: 10px;
+  padding: 6px 2px 2px;
+}
+
+.token-provider-panel-copy {
+  display: block;
+  max-width: 100%;
+  color: #cbd5e1;
+  font-weight: 600;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+}
+
+.token-provider-panel-state[data-testid='token-provider-panel-state-config-error'] .token-provider-panel-copy,
+.token-provider-panel-state[data-testid='token-provider-panel-state-refresh-error'] .token-provider-panel-copy {
   color: #fca5a5;
 }
 
-@media (max-width: 1100px) {
-  .codex-quota-chip {
-    display: none;
-  }
+.token-provider-panel-cta {
+  border: 1px solid #334155;
+  border-radius: 8px;
+  background: #111a2c;
+  color: #e2e8f0;
+  padding: 6px 10px;
+  font-size: 11px;
+  font-family: inherit;
+  cursor: pointer;
+}
+
+.token-provider-panel-cta:hover {
+  background: #1d2a45;
+}
+
+.token-provider-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.token-provider-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px;
+  border: 1px solid #1e293b;
+  border-radius: 10px;
+  background: rgba(15, 23, 42, 0.78);
+}
+
+.token-provider-block.is-error,
+.token-provider-block.is-invalid_output,
+.token-provider-block.is-timed_out,
+.token-provider-block.is-empty,
+.token-provider-block.is-config_error {
+  border-color: rgba(248, 113, 113, 0.28);
+}
+
+.token-provider-block-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.token-provider-name {
+  min-width: 0;
+  color: #f8fafc;
+  font-size: 12px;
+  font-weight: 600;
+}
+
+.token-provider-state-chip {
+  flex: 0 0 auto;
+  border: 1px solid #334155;
+  border-radius: 999px;
+  padding: 2px 6px;
+  background: rgba(2, 6, 23, 0.58);
+  color: #94a3b8;
+  font-size: 10px;
+  text-transform: lowercase;
+}
+
+.token-provider-block.is-ok .token-provider-state-chip {
+  color: #86efac;
+}
+
+.token-provider-block.is-error .token-provider-state-chip,
+.token-provider-block.is-invalid_output .token-provider-state-chip,
+.token-provider-block.is-timed_out .token-provider-state-chip,
+.token-provider-block.is-empty .token-provider-state-chip,
+.token-provider-block.is-config_error .token-provider-state-chip {
+  color: #fca5a5;
+}
+
+.token-provider-rows {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.token-provider-row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: start;
+  column-gap: 12px;
+  row-gap: 2px;
+  padding: 7px 0;
+  border-top: 1px solid rgba(51, 65, 85, 0.4);
+}
+
+.token-provider-row:first-child {
+  padding-top: 0;
+  border-top: none;
+}
+
+.token-provider-row-left,
+.token-provider-row-right {
+  font-variant-numeric: tabular-nums;
+}
+
+.token-provider-row-left {
+  min-width: 0;
+  color: #cbd5e1;
+  white-space: pre-wrap;
+}
+
+.token-provider-row-right {
+  color: #f8fafc;
+  text-align: right;
+  white-space: pre;
+}
+
+.token-provider-status-copy {
+  margin: 0;
+  color: #fca5a5;
+  font-size: 11px;
+  line-height: 1.5;
+}
+
+.token-usage-dropdown-root :deep(.ui-dropdown-menu) {
+  padding: 8px;
+  background: rgba(2, 6, 23, 0.98);
+  border: 1px solid #334155;
+}
+
+.token-usage-dropdown-root :deep(.ui-dropdown-menu:not(.is-open)) {
+  visibility: hidden;
+  pointer-events: none;
+}
+
+.token-usage-dropdown-root :deep(.ui-dropdown-menu.is-open) {
+  display: block;
 }
 
 .tree-dropdown-root {
